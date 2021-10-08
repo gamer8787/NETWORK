@@ -3,7 +3,7 @@
  *
  *  Created on: 2014. 11. 20.
  *      Author: Keunhong Lee
- */
+ */ 
 
 #include "TCPAssignment.hpp"
 #include <E/E_Common.hpp>
@@ -19,6 +19,7 @@ using namespace std;
 typedef pair<int, int>  pid_fd;
 typedef pair<long, short>  addrest_port;
 map<pid_fd , addrest_port > m;
+
 TCPAssignment::TCPAssignment(Host &host)
     : HostModule("TCP", host), RoutingInfoInterface(host),
       SystemCallInterface(AF_INET, IPPROTO_TCP, host),
@@ -83,16 +84,10 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, int param1,
   
   addrest_port ap1 = m[pf1];
   struct sockaddr_in* socksock = (sockaddr_in*) param2_ptr;
-  //socklen_t len = sizeof(socksock);
-  //memset(&socksock, 0, len);
+  //memset(&socksock, 0, sizeof(socksock));
   socksock->sin_family = AF_INET;
   socksock->sin_addr.s_addr =ap1.first;
   socksock->sin_port =ap1.second;
-  /*
-  socksock->sin_family = AF_INET;
-  socksock->sin_addr.s_addr = htonl(INADDR_ANY);
-  socksock->sin_port = htons(9999);
-  */
   *param3_ptr = sizeof(param2_ptr);
 
   return returnSystemCall(syscallUUID, 0);
@@ -100,6 +95,10 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, int param1,
 
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1, 
    sockaddr*param2_ptr,socklen_t param3){
+    
+  size_t packet_size = 100;
+  Packet pkt (packet_size);
+  pkt.writeData(0, data, 20); 
 
   return returnSystemCall(syscallUUID, 0);
 }
@@ -116,19 +115,6 @@ void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
   return returnSystemCall(syscallUUID, 0);
 }
 
-void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int param1, void *ptr,int param3){
-  int size=0;
-  FILE* f=fdopen (param1, "r");
-  size = fread(ptr, 1, param3, f); //1?
-  return returnSystemCall(syscallUUID, size);
-}
-
-void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int param1, void *ptr,int param3){
-  int size=0;
-  FILE* f=fdopen (param1, "w");
-  size = fwrite(ptr, 1, param3, f); //1?
-  return returnSystemCall(syscallUUID, size);
-}
 
 void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
                                    const SystemCallParameter &param) {
@@ -141,10 +127,10 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
     this->syscall_close(syscallUUID, pid, param.param1_int);
     break;
   case READ:
-    this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
+    //this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
     break;
   case WRITE:
-    this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
+    //this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
     break;
   case CONNECT:
     this->syscall_connect(syscallUUID, pid, param.param1_int, static_cast<struct sockaddr*>(param.param2_ptr),
@@ -180,13 +166,12 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
 
 void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   // Remove below
-  (void)fromModule;
-  (void)packet;
+
 }
 
 void TCPAssignment::timerCallback(std::any payload) {
-  // Remove below
-  (void)payload;
+
+
 }
 
 } // namespace E
