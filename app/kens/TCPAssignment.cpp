@@ -14,14 +14,21 @@
 #include <cerrno>
 #include <map>
 #include <cstdlib>
+#include <cmath>
 namespace E {
 using namespace std;
-
+int num_packet=0;
 typedef pair<int, int>  pid_fd;
+typedef pair<int, int>  max_socket;
 typedef pair<uint32_t, uint16_t>  address_port;
+#define seconds pow(10,9)
+
 map<pid_fd , address_port > src_m;
 map<pid_fd , address_port > dest_m;
-map<pid_fd , int > listen_m;
+//map<pid_fd , max_socket > listen_m;
+map<address_port , int > accepted_que;
+map<address_port , max_socket > for_listen;
+
 
 TCPAssignment::TCPAssignment(Host &host)
     : HostModule("TCP", host), RoutingInfoInterface(host),
@@ -43,6 +50,8 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int param1, int pa
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int param1)
 {
   pid_fd pf1=make_pair(pid,param1);
+  accepted_que.erase(src_m[pf1]); //added
+  for_listen.erase(src_m[pf1]);
   src_m.erase(pf1);
   dest_m.erase(pf1); //added
   removeFileDescriptor(pid,param1);
@@ -100,8 +109,9 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, int param1,
 
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1, 
    sockaddr*param2_ptr,socklen_t param3){
-  /*
+  
   printf("in connect!!!\n");
+  /*
   struct sockaddr_in* socksock = (sockaddr_in *)param2_ptr;
   ipv4_t dest_ip ;  
   for(int i=0;i<4;i++){
@@ -175,8 +185,14 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1,
 
 void TCPAssignment::syscall_listen(UUID syscallUUID,int pid, int param1, 
   int param2){
-  pid_fd pf1=make_pair(pid,param1);
-  listen_m.insert(pair<pid_fd,int>(pf1, param2));
+  pid_fd pid_fd1=make_pair(pid,param1);
+  
+  address_port address_port1=src_m[pid_fd1];
+  max_socket max_socket1=make_pair(param2,0);
+
+  accepted_que.insert(pair<address_port,int>(address_port1, 0));
+  for_listen.insert(pair<address_port,max_socket>(address_port1, max_socket1));
+
   printf("listen is %d\n",param2);
   return returnSystemCall(syscallUUID, 0);
 }
@@ -184,57 +200,33 @@ void TCPAssignment::syscall_listen(UUID syscallUUID,int pid, int param1,
 void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
     		sockaddr* param2_ptr, socklen_t* param3_ptr){
   
-  
   pid_fd server_pf=make_pair(pid,param1);
+  
   if (src_m.find(server_pf) == src_m.end()) {
      return returnSystemCall(syscallUUID, -1); 
   }
   
-  address_port server_ap = src_m[server_pf];
+  address_port server_adress_port = src_m[server_pf];
   
-
+  if(for_listen[server_adress_port].second==0){
+    printf("wait\n");
+    int yet=0;
+    //TimerModule::addTimer(syscallUUID ,100*seconds);
+    return returnSystemCall(syscallUUID, -1); 
+  }
+  for_listen[server_adress_port].second-=1;
+  if (accepted_que[server_adress_port]>0){
+    accepted_que[server_adress_port]-=1;
+    for_listen[server_adress_port].second+=1;
+  }
   
-  int have_connection = 0;
-  printf("222222222222222\n");
-  for (auto iter = dest_m.begin() ; iter != dest_m.end(); iter++) {
-    printf("11111111111111111111\n");
-    std::cout << iter->first.first << iter->first.second << iter->second.first << iter->second.second << std::endl;
-    if(iter->second.first==server_ap.first && iter->second.second==server_ap.second){
-      have_connection=1;
-      /*
-      pid_fd client_pf=make_pair(iter->first.first, iter->first.second);
-      address_port clinet_ap = src_m[client_pf];
-      struct sockaddr_in* socksock = (sockaddr_in*) param2_ptr;
-      memset(&socksock, 0, sizeof(socksock));
-      socksock->sin_family = AF_INET;
-      socksock->sin_addr.s_addr =clinet_ap.first;
-      socksock->sin_port =clinet_ap.second;
-      */
-      printf("in for loop\n"); 
-    }
-  }
-  /*
-  if( have_connection ==0){
-    return returnSystemCall(syscallUUID, -2);
-    printf("in have connection\n"); 
-  }
-  */
-
   int sock_fd;
   sock_fd = createFileDescriptor(pid);
   printf("sock_fd is %d\n",sock_fd);
-  if(sock_fd > listen_m[server_pf]){
-    removeFileDescriptor(pid,sock_fd);
-    printf("bigger than\n"); 
-    return returnSystemCall(syscallUUID, -3);
-  }
-  pid_fd pf1 = make_pair(pid,sock_fd);
-  src_m.insert(pair<pid_fd, address_port>(pf1, server_ap));
 
-  if (src_m.find(pf1) == src_m.end()) {
-     return returnSystemCall(syscallUUID, -1); 
-  }
-  
+  pid_fd pf1 = make_pair(pid,sock_fd);
+  src_m.insert(pair<pid_fd, address_port>(pf1, server_adress_port));
+
   address_port ap1 = src_m[pf1];
   struct sockaddr_in* socksock = (sockaddr_in*) param2_ptr;
   //memset(&socksock, 0, sizeof(socksock));
@@ -312,8 +304,6 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
 }
 
 void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
-  // Remove below
-
   int ip_start= 14;
   int tcp_start = 34;
 
@@ -338,16 +328,19 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   packet.readData(tcp_start+14, &window, 2);
   packet.readData(tcp_start+16, &checksum, 2);
   uint8_t test[20];
-  uint16_t test_checksum = NetworkUtil::tcp_sum(src_ip,dest_ip,test,20);
+  packet.readData(tcp_start, &test, 20);
+  uint16_t test_checksum;
+  test_checksum = NetworkUtil::tcp_sum(src_ip,dest_ip,test,20);
+  //uint16_t test_checksum = NetworkUtil::tcp_sum(src_ip),ntohl(dest_ip),test,20);
   test_checksum = ~test_checksum;
   test_checksum = htons(test_checksum);
-  std::cout << std::hex << checksum << " checksum " << std::endl;
-  std::cout << std::hex << test_checksum << " test_checksum " << std::endl;
+  //std::cout << std::hex << checksum << " checksum " << std::endl;
+  //std::cout << std::hex << test_checksum << " test_checksum " << std::endl;
   
+  
+  //std::cout << std::hex << ntohl(src_ip) << " Src ip " <<  std::hex << ntohl(dest_ip) <<" dest_ip"<< std::endl;
+  //std::cout << std::hex << ntohs(src_port) << " src_port " <<  std::hex << ntohs(dest_port) << " dest_port " << std::endl;
   /*
-  std::cout << std::hex << ntohl(src_ip) << " Src ip " << std::hex << src_ip << " just "<<  std::hex << ntohl(dest_ip) <<" dest_ip"<< std::endl;
-  std::cout << std::hex << ntohs(src_port) << " src_port " << std::endl;
-  std::cout << std::hex << ntohs(dest_port) << " dest_port " << std::endl;
   std::cout << std::hex << seq_num << " seq_num " << std::endl;
   std::cout << std::hex << ack_num << " ack_num " << std::endl;
   std::cout << std::hex << ntohs(flag) << " flag " << std::endl;
@@ -359,8 +352,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   size_t pkt_size = 54;
   Packet pkt (pkt_size);
 
-  
-  
   pkt.writeData(ip_start+12, (uint8_t *)&dest_ip, 4);
   pkt.writeData(ip_start+16, (uint8_t *)&src_ip, 4);
   pkt.writeData(tcp_start, (uint8_t *)&dest_port, 2);
@@ -368,7 +359,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
   std::srand(5000);  
   uint32_t new_seq_num;
-  uint32_t new_ack_num=htonl(ntohl(seq_num)+1);
+  uint32_t new_ack_num=htonl(ntohl(seq_num)+1); //o
+  //uint32_t new_ack_num=seq_num+1;
 
   //
   pkt.writeData(tcp_start+8, (uint8_t *)&new_ack_num, 4); //ack_num
@@ -376,14 +368,23 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
   uint16_t new_flag;
   uint16_t new_checksum;
-  //printf("%x\n",real_flag);
+  printf("flag is %x\n",real_flag);
   switch(real_flag){
-    case 0b00000010: //syn
+    case 0b00000010:{ //connect, syn
+        TimerModule::addTimer(NULL ,100*seconds);
+        address_port server_address_port = make_pair(htonl(INADDR_ANY),dest_port);  
+        if(for_listen[server_address_port].first==for_listen[server_address_port].second){
+          accepted_que[server_address_port]+=1;
+          for_listen[server_address_port].second-=1;
+        }
+        //accepted_que[server_address_port]+=1;
+        for_listen[server_address_port].second+=1;
         new_flag = htons(0x5012);
         new_seq_num = std::rand();//
         pkt.writeData(tcp_start+4, (uint8_t *)&new_seq_num, 4); //seq_num
         pkt.writeData(tcp_start+12, (uint8_t *)&new_flag, 2); //flag
       break;
+    }
     case 0b00010010:
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
@@ -397,7 +398,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         pkt.writeData(tcp_start+12, (uint8_t *)&new_flag, 2); //flag
       break;
     case 0b00010001:
-
+      break;
     default :    
       //printf("%x\n",real_flag);
       //printf("not yet\n");
@@ -408,22 +409,20 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
   uint8_t temp[20];
   pkt.readData(tcp_start, &temp, 20);
-  new_checksum = NetworkUtil::tcp_sum(dest_ip,src_ip,temp,20); //ntoh?
+  //new_checksum = NetworkUtil::tcp_sum(dest_ip,src_ip,temp,20); //ntoh?
+  new_checksum = NetworkUtil::tcp_sum(src_ip,dest_ip,temp,20); //ntoh?
   new_checksum = ~new_checksum;
   new_checksum = htons(new_checksum);
+  //std::cout << std::hex << new_checksum << " new_checksum " << std::endl;
   pkt.writeData(tcp_start + 16, (uint8_t *)&new_checksum, 2);
-
+  num_packet+=1;
   sendPacket("IPv4", std::move(pkt));
-
-  //printf("moudule is %s\n",fromModule);
-  packet.readData(tcp_start, &temp, 20);
-  for(int i=0;i<20;i++){
-    //printf("%dth is %x\n",i,temp[i]);
-  }
+  
 } 
 
 void TCPAssignment::timerCallback(std::any payload) {
-
+  //int a =std::any_cast<int>(payload);
+  //std::cout << "a is !!!!!!!!" << a << std::endl;
 
 }
 
