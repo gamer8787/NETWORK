@@ -26,7 +26,9 @@ typedef pair<uint32_t, uint16_t>  address_port;
 map<pid_fd , address_port > src_m;
 map<pid_fd , address_port > dest_m;
 //map<pid_fd , max_socket > listen_m;
+map<address_port , int > accepted_que;
 map<address_port , max_socket > for_listen;
+
 
 TCPAssignment::TCPAssignment(Host &host)
     : HostModule("TCP", host), RoutingInfoInterface(host),
@@ -48,7 +50,8 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int param1, int pa
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int param1)
 {
   pid_fd pf1=make_pair(pid,param1);
-  for_listen.erase(src_m[pf1]); //added
+  accepted_que.erase(src_m[pf1]); //added
+  for_listen.erase(src_m[pf1]);
   src_m.erase(pf1);
   dest_m.erase(pf1); //added
   removeFileDescriptor(pid,param1);
@@ -183,11 +186,13 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1,
 void TCPAssignment::syscall_listen(UUID syscallUUID,int pid, int param1, 
   int param2){
   pid_fd pid_fd1=make_pair(pid,param1);
-  max_socket max_socket1=make_pair(param2,0);
   
   address_port address_port1=src_m[pid_fd1];
+  max_socket max_socket1=make_pair(param2,0);
 
+  accepted_que.insert(pair<address_port,int>(address_port1, 0));
   for_listen.insert(pair<address_port,max_socket>(address_port1, max_socket1));
+
   printf("listen is %d\n",param2);
   return returnSystemCall(syscallUUID, 0);
 }
@@ -205,11 +210,15 @@ void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
   
   if(for_listen[server_adress_port].second==0){
     printf("wait\n");
-    int yet=0;
     //TimerModule::addTimer(syscallUUID ,100*seconds);
     return returnSystemCall(syscallUUID, -1); 
   }
   for_listen[server_adress_port].second-=1;
+  if (accepted_que[server_adress_port]>0){
+    accepted_que[server_adress_port]-=1;
+    for_listen[server_adress_port].second+=1;
+  }
+  
   int sock_fd;
   sock_fd = createFileDescriptor(pid);
   printf("sock_fd is %d\n",sock_fd);
@@ -306,7 +315,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   uint16_t flag;
   uint16_t window;
   uint16_t checksum;
-  uint16_t urg;
+  //uint16_t urg;
 
   packet.readData(tcp_start-8, &src_ip, 4);
   packet.readData(tcp_start-4, &dest_ip, 4);
@@ -364,7 +373,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         TimerModule::addTimer(NULL ,100*seconds);
         address_port server_address_port = make_pair(htonl(INADDR_ANY),dest_port);  
         if(for_listen[server_address_port].first==for_listen[server_address_port].second){
-          return; //not send
+          accepted_que[server_address_port]+=1;
+          for_listen[server_address_port].second-=1;
+          //return;
         }
         for_listen[server_address_port].second+=1;
         new_flag = htons(0x5012);
@@ -379,12 +390,15 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         pkt.writeData(tcp_start+4, (uint8_t *)&new_seq_num, 4); //seq_num
         pkt.writeData(tcp_start+12, (uint8_t *)&new_flag, 2); //flag
       break;
-    case 0b00010000:
+    case 0b00010000:{
+        //address_port server_address_port = make_pair(htonl(INADDR_ANY),dest_port); 
+        //accepted_que[server_address_port]+=1;
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
         pkt.writeData(tcp_start+4, (uint8_t *)&new_seq_num, 4); //seq_num
         pkt.writeData(tcp_start+12, (uint8_t *)&new_flag, 2); //flag
       break;
+  }
     case 0b00010001:
       break;
     default :    
