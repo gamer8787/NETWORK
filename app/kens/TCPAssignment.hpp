@@ -42,6 +42,8 @@ public:
   int param2_int);
   virtual void syscall_accept(UUID syscallUUID,int pid, int param1,
     		sockaddr* param2_ptr, socklen_t* param3_ptr);
+  virtual void syscall_getpeername(UUID syscallUUID, int pid, int param1,
+    	sockaddr * param2_ptr, socklen_t*param3_ptr);
 protected:
   virtual void systemCallback(UUID syscallUUID, int pid,
                               const SystemCallParameter &param) final;
