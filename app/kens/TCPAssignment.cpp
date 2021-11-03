@@ -60,7 +60,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int param1)
   pid_fd pf1=make_pair(pid,param1);
   listen_que_map.erase(bind_map[pf1]); //FIN에서 진행
   //listen_room_size_map.erase(bind_map[pf1]);   //FIN에서 진행 ? 적절한 곳에서 해야됨 
-  listen_is_connected_map.erase(bind_map[pf1]);
+  //listen_is_connected_map.erase(bind_map[pf1]);
   bind_map.erase(pf1); 
   connect_map.erase(pf1);
   removeFileDescriptor(pid,param1);
@@ -176,6 +176,7 @@ void TCPAssignment::syscall_listen(UUID syscallUUID,int pid, int param1,
   listen_que_map.insert(pair<address_port,listen_que>(address_port1, lq));
   listen_room_size_map.erase(address_port1);
   listen_room_size_map.insert(pair<address_port, int >(address_port1, param2));
+  listen_is_connected_map.erase(address_port1);
   listen_is_connected_map.insert(pair<address_port, int >(address_port1, 0));
   printf("listen is %d\n",param2);
   return returnSystemCall(syscallUUID, 0);
@@ -192,15 +193,14 @@ void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
   }
   
   address_port server_address_port = bind_map[server_pf];
-  if(listen_que_map[server_address_port].second.size()!=0){
+  if(listen_que_map[server_address_port].second.size()!=0){ //complete_listen_que에 있는 것 다 빼줌 대기열 크기 상관없이
     listen_que_map[server_address_port].second.pop_front();
   }
-  else if(listen_que_map[server_address_port].first.size()!=0){
+  else if(listen_que_map[server_address_port].first.size()!=0){ //ready_listen_que에 있는 것 다 빼줌 최대 대기열 크기
     listen_que_map[server_address_port].first.pop_front();
   }
-  
   else{
-    if(listen_is_connected_map[server_address_port]==0){
+    if(listen_is_connected_map[server_address_port]==0){ //만약 connect 시도한 클라가 없으면 대기(이 함수를 몇 0.5초 뒤에 실행함)
       vector<any> all_information;
       all_information.push_back(0);
       all_information.push_back(syscallUUID);
@@ -210,13 +210,13 @@ void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
       all_information.push_back(param3_ptr);
       TimerModule::addTimer(all_information ,0.5*seconds);
       return;
-      listen_que_map[server_address_port].first.pop_front();
     }
     else {
       return returnSystemCall(syscallUUID, -1);
     }
   }
 
+  //if문 끝난후 각각 socket 생성해줌
   int sock_fd;
   sock_fd = createFileDescriptor(pid);
   printf("sock_fd is %d\n",sock_fd);
@@ -315,7 +315,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   uint16_t flag;
   uint16_t window;
   uint16_t checksum;
-  //uint16_t urg;
 
   packet.readData(tcp_start-8, &src_ip, 4);
   packet.readData(tcp_start-4, &dest_ip, 4);
@@ -328,67 +327,50 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   packet.readData(tcp_start+16, &checksum, 2);
 
   uint8_t real_flag = ntohs(flag) & 0xff;
-
-  /*
-  pkt.writeData(tcp_start-8, (uint8_t *)&dest_ip, 4);
-  pkt.writeData(tcp_start-4, (uint8_t *)&src_ip, 4);
-  pkt.writeData(tcp_start, (uint8_t *)&dest_port, 2);
-  pkt.writeData(tcp_start+2, (uint8_t *)&src_port, 2);
-  */
   std::srand(5000);  
   uint32_t new_seq_num;
   uint32_t new_ack_num=htonl(ntohl(seq_num)+1); 
-  /*
-  pkt.writeData(tcp_start+8, (uint8_t *)&new_ack_num, 4); //ack_num
-  pkt.writeData(tcp_start+14, (uint8_t *)&window, 2); //window
-  */
   uint16_t new_flag;
-  uint16_t new_checksum;
   //printf("flag is %x src_port is %x\n",real_flag, src_port);
   //printf("flag is %x \n",real_flag);
   switch(real_flag){
-    case 0b00000010:{ //connect, syn
+    case 0b00000010:{ //SYN, HANDSHAKE 첫 단계 (서버)
         address_port server_address_port;
-        address_port INADDR_address_port = make_pair(htonl(INADDR_ANY),dest_port);
-        address_port dest_address_port = make_pair(dest_ip,dest_port);
-        for (auto iter = bind_map.begin() ; iter != bind_map.end(); iter++) {
+        address_port INADDR_address_port = make_pair(htonl(INADDR_ANY),dest_port); //서버가 bind를 inaddr로 만들었을때의 pair
+        address_port dest_address_port = make_pair(dest_ip,dest_port);             //서버가 bind를 특정ip로 만들었을때의 pair
+        for (auto iter = bind_map.begin() ; iter != bind_map.end(); iter++) {       
           if(iter->second.first==INADDR_address_port.first && iter->second.second==INADDR_address_port.second){
-            server_address_port = INADDR_address_port; 
+            server_address_port = INADDR_address_port;  //서버가 bind를 inaddr로 만들었을 경우 (inaddr ip/port) 에 listen que를 만듬
           }
           else{
-            server_address_port = dest_address_port; 
+            server_address_port = dest_address_port;   //아닐 경우 (특정 ip/port) 에 listen que를 만듬
           }
         }
-        listen_is_connected_map[server_address_port]=1; //connect 된게 있음
+        listen_is_connected_map[server_address_port]=1; //클라로부터 커넥트가 왔으므로 1로 설정
         new_flag = htons(0x5012);
         new_seq_num = std::rand();//
-        //pkt.writeData(tcp_start+4, (uint8_t *)&new_seq_num, 4); //seq_num
-        //pkt.writeData(tcp_start+12, (uint8_t *)&new_flag, 2); //flag 
         //cout << "listen size is " << listen_room_size_map[server_address_port] << endl;
-        if(listen_room_size_map[server_address_port]==listen_que_map[server_address_port].first.size()){
-          if(listen_room_size_map[server_address_port]==0){
+        if(listen_room_size_map[server_address_port]==listen_que_map[server_address_port].first.size()){ //ready_listen_que의 크기가 대기열 크기랑 같을 때 full
+          if(listen_room_size_map[server_address_port]==0){ //대기열 크기가 0일 때 <= listen을 안 하고 연결하는 경우(handshake 마지막 case)
             break;
           }
-          else{
-            return; //=> 아예 안보냄, 아래꺼는 no ack no syn
+          else{ //대기열 크기가 다 찼으므로 더이상 안 받고 버림 클라이언트한테 아무것도 안 보냄
+            return; 
           }
-          break;
-        }
+        } //대기열이 넉넉하면 ready_listen_que 하나 넣어줌
         else{
           listen_que_map[server_address_port].first.push_back(src_port);
         }
       break;
     }
-    case 0b00010010:  //SYN + ACK
+    case 0b00010010:  //SYN + ACK, HANDSHAKE 두 단계 (클라)
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
-        //pkt.writeData(tcp_start+4, (uint8_t *)&new_seq_num, 4); //seq_num
-        //pkt.writeData(tcp_start+12, (uint8_t *)&new_flag, 2); //flag
       break;
-    case 0b00010000:{  //ACK
+    case 0b00010000:{  //ACK, HANDSHAKE 세 단계 (서버)
         address_port server_address_port;
-        address_port INADDR_address_port = make_pair(htonl(INADDR_ANY),dest_port);
-        address_port dest_address_port = make_pair(dest_ip,dest_port);
+        address_port INADDR_address_port = make_pair(htonl(INADDR_ANY),dest_port); //서버가 bind를 inaddr로 만들었을때의 pair
+        address_port dest_address_port = make_pair(dest_ip,dest_port);             //서버가 bind를 특정ip로 만들었을때의 pair
         for (auto iter = bind_map.begin() ; iter != bind_map.end(); iter++) {
           if(iter->second.first==INADDR_address_port.first && iter->second.second==INADDR_address_port.second){
             server_address_port = INADDR_address_port; 
@@ -397,7 +379,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
             server_address_port = dest_address_port; 
           }
         }
-        if(listen_que_map[server_address_port].first.size()!=0){
+        if(listen_que_map[server_address_port].first.size()!=0){ //ready_listen_que 에 있는 것들을 complete_listen_que 옮겨줌
           for(auto iter = listen_que_map[server_address_port].first.begin(); iter!= listen_que_map[server_address_port].first.end(); iter++){
             if (*iter==src_port){
               listen_que_map[server_address_port].first.erase(iter);
@@ -409,20 +391,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
-        //pkt.writeData(tcp_start+4, (uint8_t *)&new_seq_num, 4); //seq_num
-        //pkt.writeData(tcp_start+12, (uint8_t *)&new_flag, 2); //flag
       break;
   }
     case 0b00010001: //FIN + ACK
         new_flag = htons(0x5010);
         new_seq_num = std::rand();//
-        //pkt.writeData(tcp_start+4, (uint8_t *)&new_seq_num, 4); //seq_num
-        //pkt.writeData(tcp_start+12, (uint8_t *)&new_flag, 2); //flag
-    
       break;
-    case 0b00000001:
-        printf("ONLY FIN BIT\n");
-        break;
     default :    
       printf("flag is !! %x\n",real_flag);
       printf("not yet\n");
@@ -430,40 +404,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       //perror("not yet\n");
       break;
   }
-  /*
-  uint8_t temp[20];
-  pkt.readData(tcp_start, &temp, 20);
-  new_checksum = NetworkUtil::tcp_sum(dest_ip,src_ip,temp,20); 
-  new_checksum = ~new_checksum;
-  new_checksum = htons(new_checksum);
-  pkt.writeData(tcp_start + 16, (uint8_t *)&new_checksum, 2);
-  sendPacket("IPv4", std::move(pkt));
-  */
-  array<any, 8> pkt_variable = {&src_ip, &dest_ip, &src_port, &dest_port
+  array<any, 8> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port
   ,&new_seq_num, &new_ack_num, &new_flag, &window};
   Write_and_Send_pkt(pkt_variable);
-  
-  if (real_flag==0b00010001){
-    //Packet pkt3 = pkt.clone();  // cloning pkt. pkt2 has different UUID
-    //Packet pkt3 = pkt;          // copying pkt. pkt3 has same UUID
-    new_seq_num=htonl(ntohl(new_seq_num)+1); //o
-    new_flag = htons(0x5011);
-    //pkt3.writeData(tcp_start+4, (uint8_t *)&new_seq_num, 4); //seq_num
-    //pkt3.writeData(tcp_start+12, (uint8_t *)&new_flag, 2); //flag
-    //new_checksum = NetworkUtil::tcp_sum(dest_ip,src_ip,temp,20); //ntoh?
-    //new_checksum = ~new_checksum;
-    //new_checksum = htons(new_checksum);
-    //pkt3.writeData(tcp_start + 16, (uint8_t *)&new_checksum, 2);
-    
-    vector<any> all_information;
-    //all_information.push_back(1);
-    //all_information.push_back(pkt3);
-    //sendPacket("IPv4", std::move(pkt3));
-    array<any, 8> pkt_variable_2 = {&src_ip, &dest_ip, &src_port, &dest_port
-    ,&new_seq_num, &new_ack_num, &new_flag, &window};
-    Write_and_Send_pkt(pkt_variable_2);
-    //TimerModule::addTimer(all_information,0.5*seconds); //1초 뒤에 보냄 정확한 시간은 나중에 고쳐야 됨
-  }
 } 
 
 void TCPAssignment::timerCallback(std::any payload) {
