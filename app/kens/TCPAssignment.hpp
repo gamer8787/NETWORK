@@ -48,6 +48,7 @@ protected:
   virtual void systemCallback(UUID syscallUUID, int pid,
                               const SystemCallParameter &param) final;
   virtual void packetArrived(std::string fromModule, Packet &&packet) final;
+  virtual void Write_and_Send_pkt(std::any pkt) final;
 };
 
 class TCPAssignmentProvider {
