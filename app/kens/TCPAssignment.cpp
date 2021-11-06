@@ -16,8 +16,21 @@
 #include <cstdlib>
 #include <cmath>
 #include <list>
+#include <unistd.h>
 namespace E {
 using namespace std;
+#define min(a,b) (((a)<(b))?(a):(b))
+#define max(a,b) (((a)>(b))?(a):(b))
+
+//for test
+#define buffer_size 2097152
+uint8_t recv_buffer[buffer_size];
+int data_size=0;
+int read_index = 0;
+int recv_index = 0;
+vector<any> read_information;
+
+
 
 typedef pair<int, int>  pid_fd;
 typedef pair<uint32_t, uint16_t>  address_port;
@@ -27,6 +40,7 @@ typedef list<uint16_t> complete_listen_que ;
 typedef pair<ready_listen_que,complete_listen_que> listen_que;
 typedef tuple<uint32_t, uint16_t, uint32_t,uint16_t> Four_tuple;
 
+
 #define seconds pow(10,9)
 #define tcp_start 34
 #define packet_size 54
@@ -35,6 +49,7 @@ map<pid_fd , address_port > bind_map;
 map<address_port , listen_que > listen_que_map;
 map<address_port , int > listen_room_size_map;
 map<address_port , int > listen_is_connected_map;
+map<address_port , int > already_received_data_map;
 map<pid_fd , Four_tuple > connect_map;
 
 TCPAssignment::TCPAssignment(Host &host)
@@ -70,7 +85,7 @@ void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int param1)
 void TCPAssignment::syscall_bind(UUID syscallUUID, int pid, int param1_int, sockaddr * param2_ptr, socklen_t param3_int){
 
   struct sockaddr_in* socksock = (sockaddr_in *)param2_ptr;
-  
+  cout << "bind!" << endl;
   pid_fd pf1=make_pair(pid,param1_int);
   address_port ap1=make_pair(socksock->sin_addr.s_addr,socksock->sin_port);
   address_port INADDR_ANY_port=make_pair(htonl(INADDR_ANY),socksock->sin_port);
@@ -125,7 +140,7 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, int param1,
 
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1, 
    sockaddr*param2_ptr,socklen_t param3){
-  
+  cout << "connect!" << endl;
   struct sockaddr_in* socksock = (sockaddr_in *)param2_ptr;
   ipv4_t dest_ip ;  
   for(int i=0;i<4;i++){
@@ -146,11 +161,11 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1,
   uint32_t seq_num =1;
   uint32_t ack_num =0;
   uint16_t flag = 0x5002; 
-  uint16_t window = 0x0000; 
+  uint16_t window = 0xc800; 
   seq_num = htonl(seq_num);
   ack_num = htonl(ack_num);
   flag = htons(flag);
-
+  window = htons(window);
   std::array<any, 8> pkt_variable = {&src_ip_32, &dest_ip_32, &source_port, &dest_port
   ,&seq_num, &ack_num, &flag, &window};
   Write_and_Send_pkt(pkt_variable);
@@ -184,7 +199,7 @@ void TCPAssignment::syscall_listen(UUID syscallUUID,int pid, int param1,
 
 void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
     		sockaddr* param2_ptr, socklen_t* param3_ptr){
-  
+  cout << "accept!" << endl;
   pid_fd server_pf=make_pair(pid,param1);
   
   if (bind_map.find(server_pf) == bind_map.end()) {
@@ -202,7 +217,7 @@ void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
   else{
     if(listen_is_connected_map[server_address_port]==0){ //만약 connect 시도한 클라가 없으면 대기(이 함수를 몇 0.5초 뒤에 실행함)
       vector<any> all_information;
-      all_information.push_back(0);
+      all_information.push_back(0); //accept 함수는 처음에 1넣음
       all_information.push_back(syscallUUID);
       all_information.push_back(pid);
       all_information.push_back(param1);
@@ -256,6 +271,41 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid, int param1,
   return returnSystemCall(syscallUUID, 0);
 }
 
+void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int param1, void *ptr, int param2){
+  cout << "read!!!" <<endl;
+  uint8_t * new_ptr =(uint8_t *) ptr;
+  int return_value = -1;
+  if(recv_index==0){ //received 된 data 없으면 0.5초 뒤에 실행
+    read_information.push_back(1); //read 함수는 처음에 1넣음
+    read_information.push_back(syscallUUID);
+    read_information.push_back(pid);
+    read_information.push_back(param1);
+    read_information.push_back(ptr);
+    read_information.push_back(param2);                                     
+    TimerModule::addTimer(read_information ,0.5*seconds);
+    return;
+  }
+  else{
+    int read_in_function =  min(recv_index-read_index, param2);
+    if (read_in_function ==0 ){
+       return returnSystemCall(syscallUUID, -1);
+    }
+    for (int k = 0; k < read_in_function; k++){
+        new_ptr[k] = recv_buffer[read_index+k];
+    }
+    return_value = read_in_function; 
+    read_index += read_in_function; 
+  }
+  printf("return value is %d\n",return_value);
+  return returnSystemCall(syscallUUID, return_value);
+}
+
+void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int param1, void *ptr, int param2){
+  cout << "write!!!" <<endl;
+
+  return returnSystemCall(syscallUUID, -1);
+}
+
 
 void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
                                    const SystemCallParameter &param) {
@@ -268,10 +318,10 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
     this->syscall_close(syscallUUID, pid, param.param1_int);
     break;
   case READ:
-    //this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
+    this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
     break;
   case WRITE:
-    //this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
+    this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
     break;
   case CONNECT:
     this->syscall_connect(syscallUUID, pid, param.param1_int, static_cast<struct sockaddr*>(param.param2_ptr), (socklen_t)param.param3_int);
@@ -302,10 +352,6 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
 }
 
 void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
-  if(fromModule.compare("IPv4")!=0){
-    cout<< "moudl is " << fromModule << endl;
-  }
-
   uint32_t src_ip;
   uint32_t dest_ip;
   uint16_t src_port;
@@ -325,14 +371,29 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   packet.readData(tcp_start+12, &flag, 2);
   packet.readData(tcp_start+14, &window, 2);
   packet.readData(tcp_start+16, &checksum, 2);
-
   uint8_t real_flag = ntohs(flag) & 0xff;
   std::srand(5000);  
   uint32_t new_seq_num;
   uint32_t new_ack_num=htonl(ntohl(seq_num)+1); 
   uint16_t new_flag;
-  //printf("flag is %x src_port is %x\n",real_flag, src_port);
+  printf("flag is %x seq_num is %x\n",real_flag, ntohs(seq_num));
   //printf("flag is %x \n",real_flag);
+  
+  data_size = packet.getSize()-54;
+  recv_index +=data_size;
+  if(recv_index==0){
+          printf("no data\n");
+        }
+  else{
+    packet.readData(tcp_start+20, &(recv_buffer[recv_index-data_size]), data_size); //data_size만큼 buffer에 recv함
+    //printf("has data\n");
+    //syscall_read(any_cast<UUID>(read_information[1]), any_cast<int>(read_information[2])
+    //, any_cast<int>(read_information[3]), any_cast<void *>(read_information[4]), any_cast<int>(read_information[5]));
+    new_ack_num=htonl(ntohl(seq_num)+data_size); 
+    //cout << packet.getSize() << endl;
+  }
+  
+  
   switch(real_flag){
     case 0b00000010:{ //SYN, HANDSHAKE 첫 단계 (서버)
         address_port server_address_port;
@@ -355,6 +416,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
             break;
           }
           else{ //대기열 크기가 다 찼으므로 더이상 안 받고 버림 클라이언트한테 아무것도 안 보냄
+            printf("no send\n");
             return; 
           }
         } //대기열이 넉넉하면 ready_listen_que 하나 넣어줌
@@ -364,7 +426,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       break;
     }
     case 0b00010010:  //SYN + ACK, HANDSHAKE 두 단계 (클라)
-        new_flag = htons(0x5010);
+        new_flag = htons(0x5010);      
         new_seq_num = ack_num;
       break;
     case 0b00010000:{  //ACK, HANDSHAKE 세 단계 (서버)
@@ -404,8 +466,10 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       //perror("not yet\n");
       break;
   }
+  //window = 0;
   array<any, 8> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port
   ,&new_seq_num, &new_ack_num, &new_flag, &window};
+  //printf("1111\n");
   Write_and_Send_pkt(pkt_variable);
 } 
 
@@ -413,12 +477,13 @@ void TCPAssignment::timerCallback(std::any payload) {
   
   vector<any> all_information = any_cast<vector<any>>(payload);
   switch (any_cast<int>(all_information[0])) {
-    case 0:
+    case 0: //accept 함수
       syscall_accept(any_cast<UUID>(all_information[1]), any_cast<int>(all_information[2])
       , any_cast<int>(all_information[3]), any_cast<sockaddr*>(all_information[4]), any_cast<socklen_t*>(all_information[5]));
       break;
-    case 1:{
-      sendPacket("IPv4", std::move(any_cast<Packet>(all_information[1])));
+    case 1:{ //read 함수
+      syscall_read(any_cast<UUID>(all_information[1]), any_cast<int>(all_information[2])
+      , any_cast<int>(all_information[3]), any_cast<void *>(all_information[4]), any_cast<int>(all_information[5]));
       break;
     }
     default:
