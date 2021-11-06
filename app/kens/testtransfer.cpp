@@ -109,19 +109,25 @@ protected:
     while (!stop) {
       for (int k = 0; k < buffer_size; k++)
         send_buffer[k] = rand_d(rand_e);
-
+        /*
+      for(int k=0; k < 32; k++)
+        printf("send buffer%d is %x\n",k,send_buffer[k]);
+        */
       if (is_send) {
         int remaining = buffer_size;
         int write_byte = 0;
+        printf("before write\n");
         while ((write_byte =
                     write(client_fd, send_buffer + (buffer_size - remaining),
                           remaining)) >= 0) {
+          printf("in while write!\n");                    
           total_size += write_byte;
           remaining -= write_byte;
           EXPECT_GE(remaining, 0);
           if (remaining == 0)
             break;
         }
+        printf("write byte is %d\n",write_byte);
         if (write_byte < 0)
           break;
       } else {
@@ -244,6 +250,7 @@ protected:
       } else {
         int remaining = buffer_size;
         int read_byte = 0;
+        printf("remaining is %d\n",remaining);
         while ((read_byte =
                     read(client_socket, recv_buffer + (buffer_size - remaining),
                          remaining)) >= 0) {
@@ -254,9 +261,11 @@ protected:
             break;
         }
         if (buffer_size - remaining > 0) {
+            printf("2222\n");
           for (int j = 0; j < buffer_size - remaining; j++) {
             EXPECT_EQ(send_buffer[j], recv_buffer[j]);
           }
+          printf("3333\n");
         }
         if (read_byte < 0)
           break;

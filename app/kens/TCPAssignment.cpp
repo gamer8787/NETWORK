@@ -140,6 +140,9 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, int param1,
 
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1, 
    sockaddr*param2_ptr,socklen_t param3){
+  recv_index = 0; //매 테스트 case 마다 일단 초기화
+  read_index = 0; //매 테스트 case 마다 일단 초기화
+  memset(&recv_buffer, 0, sizeof(recv_buffer));
   cout << "connect!" << endl;
   struct sockaddr_in* socksock = (sockaddr_in *)param2_ptr;
   ipv4_t dest_ip ;  
@@ -275,6 +278,10 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int param1, void *pt
   cout << "read!!!" <<endl;
   uint8_t * new_ptr =(uint8_t *) ptr;
   int return_value = -1;
+  printf("syscalluuid is %d pid is %d param2 is %d\n", syscallUUID, pid, param2);
+  vector<any> read_information2;
+  read_information = read_information2;
+  //cout << "size is "<< sizeof(read_information2) << ", " <<read_information2.size() << endl;
   if(recv_index==0){ //received 된 data 없으면 0.5초 뒤에 실행
     read_information.push_back(1); //read 함수는 처음에 1넣음
     read_information.push_back(syscallUUID);
@@ -282,21 +289,27 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int param1, void *pt
     read_information.push_back(param1);
     read_information.push_back(ptr);
     read_information.push_back(param2);                                     
-    TimerModule::addTimer(read_information ,0.5*seconds);
+    TimerModule::addTimer(read_information ,0.5*seconds); //<- 나중에 문제 될 수도 있음.
     return;
   }
   else{
     int read_in_function =  min(recv_index-read_index, param2);
+    printf("%d %d\n",recv_index-read_index, param2);
     if (read_in_function ==0 ){
        return returnSystemCall(syscallUUID, -1);
     }
+    printf("1111\n");
     for (int k = 0; k < read_in_function; k++){
+        //printf("2222\n");
         new_ptr[k] = recv_buffer[read_index+k];
+        //printf("3333\n");
     }
+    printf("4444\n");
     return_value = read_in_function; 
+    printf("return value is %d\n",return_value);
     read_index += read_in_function; 
   }
-  printf("return value is %d\n",return_value);
+  //printf("return value is %d\n",return_value);
   return returnSystemCall(syscallUUID, return_value);
 }
 
@@ -376,7 +389,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   uint32_t new_seq_num;
   uint32_t new_ack_num=htonl(ntohl(seq_num)+1); 
   uint16_t new_flag;
-  printf("flag is %x seq_num is %x\n",real_flag, ntohs(seq_num));
+  //printf("flag is %x seq_num is %x\n",real_flag, ntohs(seq_num));
   //printf("flag is %x \n",real_flag);
   
   data_size = packet.getSize()-54;
@@ -482,6 +495,7 @@ void TCPAssignment::timerCallback(std::any payload) {
       , any_cast<int>(all_information[3]), any_cast<sockaddr*>(all_information[4]), any_cast<socklen_t*>(all_information[5]));
       break;
     case 1:{ //read 함수
+      printf("in timer callback uuid, param2 is %d, %d\n", any_cast<UUID>(all_information[1]),any_cast<int>(all_information[5]));
       syscall_read(any_cast<UUID>(all_information[1]), any_cast<int>(all_information[2])
       , any_cast<int>(all_information[3]), any_cast<void *>(all_information[4]), any_cast<int>(all_information[5]));
       break;
