@@ -204,7 +204,9 @@ void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
     		sockaddr* param2_ptr, socklen_t* param3_ptr){
   cout << "accept!" << endl;
   pid_fd server_pf=make_pair(pid,param1);
-  
+  recv_index = 0; //매 테스트 case 마다 일단 초기화
+  read_index = 0; //매 테스트 case 마다 일단 초기화
+  memset(&recv_buffer, 0, sizeof(recv_buffer));
   if (bind_map.find(server_pf) == bind_map.end()) {
       printf("bind_map not find!\n");
      return returnSystemCall(syscallUUID, -1); 
