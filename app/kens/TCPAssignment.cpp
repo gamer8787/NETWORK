@@ -23,14 +23,26 @@ using namespace std;
 #define max(a,b) (((a)>(b))?(a):(b))
 
 //for test
-#define buffer_size 2097152
-uint8_t recv_buffer[buffer_size];
+#define BUF_SIZE 2097152
+////read
+uint8_t recv_buffer[BUF_SIZE];
 int data_size=0;
 int read_index = 0;
 int recv_index = 0;
 vector<any> read_information;
+////write
+uint8_t send_buffer[BUF_SIZE];
+uint16_t sender_window = 0; //
+int send_not_acked_index = 0; //base
+int not_send_index = 0;       //nextseqnum
+int written_index = 0;
+uint32_t write_ack = 0;
+uint32_t write_seq = 0;
 
+uint32_t before_ack_num;
+int is_ack_first;
 
+vector<any> write_information;
 
 typedef pair<int, int>  pid_fd;
 typedef pair<uint32_t, uint16_t>  address_port;
@@ -49,7 +61,6 @@ map<pid_fd , address_port > bind_map;
 map<address_port , listen_que > listen_que_map;
 map<address_port , int > listen_room_size_map;
 map<address_port , int > listen_is_connected_map;
-map<address_port , int > already_received_data_map;
 map<pid_fd , Four_tuple > connect_map;
 
 TCPAssignment::TCPAssignment(Host &host)
@@ -277,10 +288,9 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid, int param1,
 }
 
 void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int param1, void *ptr, int param2){
-  cout << "read!!!" <<endl;
+  //cout << "read!!!" <<endl;
   uint8_t * new_ptr =(uint8_t *) ptr;
   int return_value = -1;
-  printf("syscalluuid is %d pid is %d param2 is %d\n", syscallUUID, pid, param2);
   vector<any> read_information2;
   read_information = read_information2;
   //cout << "size is "<< sizeof(read_information2) << ", " <<read_information2.size() << endl;
@@ -296,19 +306,13 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int param1, void *pt
   }
   else{
     int read_in_function =  min(recv_index-read_index, param2);
-    printf("%d %d\n",recv_index-read_index, param2);
     if (read_in_function ==0 ){
        return returnSystemCall(syscallUUID, -1);
     }
-    printf("1111\n");
     for (int k = 0; k < read_in_function; k++){
-        //printf("2222\n");
         new_ptr[k] = recv_buffer[read_index+k];
-        //printf("3333\n");
     }
-    printf("4444\n");
     return_value = read_in_function; 
-    printf("return value is %d\n",return_value);
     read_index += read_in_function; 
   }
   //printf("return value is %d\n",return_value);
@@ -317,8 +321,58 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int param1, void *pt
 
 void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int param1, void *ptr, int param2){
   cout << "write!!!" <<endl;
+  //param2=512;
+  uint8_t * new_ptr =(uint8_t *) ptr;
+  if(written_index + param2 <= BUF_SIZE){  //overflow 나중에 생각
+    for (int k = 0; k < param2; k++){
+        send_buffer[written_index + k] = new_ptr[k];
+    }
+    written_index += param2;
+  }
+  else{
+    vector<any> write_information2;
+    write_information = write_information2;
+    write_information.push_back(2); //write 함수는 처음에 2넣음
+    write_information.push_back(syscallUUID);
+    write_information.push_back(pid);
+    write_information.push_back(param1);
+    write_information.push_back(ptr);
+    write_information.push_back(param2);                                     
+    TimerModule::addTimer(write_information ,0.5*seconds); //<- 나중에 문제 될 수도 있음.
+    return;
+  }
+  //write할 공간 있고 거기에 write한 다음 send가능하면 send, 안 되면 return 
+  //printf("sender_window, not_send_index, send_not_acked_index, written_index\n");
+  //printf("%d %d %d %d\n",sender_window, not_send_index, send_not_acked_index, written_index);
+  if(written_index - send_not_acked_index < sender_window){
+    
+  //if(written_index - send_not_acked_index + param2 <= ntohs(sender_window)){ 
+  //if(written_index - send_not_acked_index + param2 <= BUF_SIZE){     
+    pid_fd pf1 = make_pair(pid, param1);
+    if (connect_map.find(pf1) == connect_map.end()) {
+      perror("pf1 not in connect_map in write function\n");
+      return returnSystemCall(syscallUUID, -1); 
+    }
+    //printf("in write %d %d\n", sender_window - (not_send_index - send_not_acked_index) , written_index - not_send_index);
+    int sended_in_function =  min(sender_window - (not_send_index - send_not_acked_index) , written_index - not_send_index);
 
-  return returnSystemCall(syscallUUID, -1);
+    Four_tuple ssdd = connect_map[pf1];
+    uint32_t src_ip = get<0>(ssdd);
+    uint16_t source_port = get<1>(ssdd);
+    uint32_t dest_ip = get<2>(ssdd);
+    uint16_t dest_port = get<3>(ssdd);
+    uint16_t flag = htons(0x5010); //ack
+    uint8_t *buffer_ptr = &send_buffer[not_send_index];
+    uint16_t sender_window2 = htons(sender_window);
+    std::array<any, 10> pkt_variable = {&src_ip, &dest_ip, &source_port, &dest_port
+    ,&write_seq, &write_ack, &flag, &sender_window2, buffer_ptr , sended_in_function};
+    Write_and_Send_pkt_have_payloaod(pkt_variable);
+    write_seq = htonl(ntohl(write_seq)+sended_in_function);
+    printf("3333\n");
+    not_send_index += sended_in_function; //written_index 만큼 send했으므로
+    return returnSystemCall(syscallUUID, param2);
+  }
+  return returnSystemCall(syscallUUID, param2);
 }
 
 
@@ -385,29 +439,29 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   packet.readData(tcp_start+8, &ack_num, 4);
   packet.readData(tcp_start+12, &flag, 2);
   packet.readData(tcp_start+14, &window, 2);
+  //printf("window is %d\n",ntohs(window));
   packet.readData(tcp_start+16, &checksum, 2);
   uint8_t real_flag = ntohs(flag) & 0xff;
   std::srand(5000);  
   uint32_t new_seq_num;
-  uint32_t new_ack_num=htonl(ntohl(seq_num)+1); 
+  uint32_t new_ack_num=htonl(ntohl(seq_num)+1); //syn_ack 이면 +1 //그냥 ack이면 그대로
+  if(real_flag == 0b00010000){ //ack일때는 그대로
+    new_ack_num =seq_num;
+  }
   uint16_t new_flag;
   //printf("flag is %x seq_num is %x\n",real_flag, ntohs(seq_num));
-  //printf("flag is %x \n",real_flag);
-  
+  printf("flag is %x \n",real_flag);
+
+  //////read 관련 
   data_size = packet.getSize()-54;
   recv_index +=data_size;
   if(recv_index==0){
-          printf("no data\n");
         }
   else{
     packet.readData(tcp_start+20, &(recv_buffer[recv_index-data_size]), data_size); //data_size만큼 buffer에 recv함
-    //printf("has data\n");
-    //syscall_read(any_cast<UUID>(read_information[1]), any_cast<int>(read_information[2])
-    //, any_cast<int>(read_information[3]), any_cast<void *>(read_information[4]), any_cast<int>(read_information[5]));
     new_ack_num=htonl(ntohl(seq_num)+data_size); 
-    //cout << packet.getSize() << endl;
   }
-  
+  //////
   
   switch(real_flag){
     case 0b00000010:{ //SYN, HANDSHAKE 첫 단계 (서버)
@@ -443,8 +497,14 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
     case 0b00010010:  //SYN + ACK, HANDSHAKE 두 단계 (클라)
         new_flag = htons(0x5010);      
         new_seq_num = ack_num;
+        ////write 함수에 쓰일 seq,ack,sender_window 정의
+        write_seq = new_seq_num;
+        write_ack = new_ack_num;
+        sender_window = ntohs(window);
+        ////첫 ack정의
+        before_ack_num = ack_num;
       break;
-    case 0b00010000:{  //ACK, HANDSHAKE 세 단계 (서버)
+    case 0b00010000:{  //ACK, HANDSHAKE 세 단계 (서버) or 그냥 ack
         address_port server_address_port;
         address_port INADDR_address_port = make_pair(htonl(INADDR_ANY),dest_port); //서버가 bind를 inaddr로 만들었을때의 pair
         address_port dest_address_port = make_pair(dest_ip,dest_port);             //서버가 bind를 특정ip로 만들었을때의 pair
@@ -465,9 +525,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
             }
           }  
         }
-
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
+        send_not_acked_index += ntohl(ack_num - before_ack_num);
+        //printf("ack num -before ack num is %d\n",ack_num - before_ack_num);
+        before_ack_num = ack_num;
+
       break;
   }
     case 0b00010001: //FIN + ACK
@@ -481,11 +544,34 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       //perror("not yet\n");
       break;
   }
-  //window = 0;
-  array<any, 8> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port
-  ,&new_seq_num, &new_ack_num, &new_flag, &window};
-  //printf("1111\n");
-  Write_and_Send_pkt(pkt_variable);
+  printf("send but not ack is %d\n",send_not_acked_index);
+  if(written_index == not_send_index){
+    array<any, 8> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port ,&new_seq_num, &new_ack_num, &new_flag, &window};
+    Write_and_Send_pkt(pkt_variable);
+  }
+  
+  else{ //written된게 있으나 not_send 된게 있으면 보냄
+    if(ntohl(ack_num) < ntohl(write_seq)){ //등호 or 부등호
+      return;
+    }
+    printf("not send index is %d, send_not acked index is %d, written index is %d\n",not_send_index,send_not_acked_index,written_index);
+    int num = min(sender_window - (not_send_index - send_not_acked_index), written_index - not_send_index);
+    uint8_t will_send[num];
+    uint8_t *ptr = will_send;
+    printf("hi\n");
+    printf("num is %d\n",num);
+    for(int k=0;k< num; k++){
+      will_send[k] = send_buffer[not_send_index+k];  
+    }
+    printf("2222\n");
+    array<any, 10> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port
+    ,&ack_num, &seq_num, &new_flag, &window, ptr, num};
+    printf("3333\n");    
+    Write_and_Send_pkt_have_payloaod(pkt_variable);
+    printf("4444\n");    
+    not_send_index += num;
+  }
+  
 } 
 
 void TCPAssignment::timerCallback(std::any payload) {
@@ -497,8 +583,12 @@ void TCPAssignment::timerCallback(std::any payload) {
       , any_cast<int>(all_information[3]), any_cast<sockaddr*>(all_information[4]), any_cast<socklen_t*>(all_information[5]));
       break;
     case 1:{ //read 함수
-      printf("in timer callback uuid, param2 is %d, %d\n", any_cast<UUID>(all_information[1]),any_cast<int>(all_information[5]));
       syscall_read(any_cast<UUID>(all_information[1]), any_cast<int>(all_information[2])
+      , any_cast<int>(all_information[3]), any_cast<void *>(all_information[4]), any_cast<int>(all_information[5]));
+      break;
+    }
+    case 2:{ //write 함수
+      syscall_write(any_cast<UUID>(all_information[1]), any_cast<int>(all_information[2])
       , any_cast<int>(all_information[3]), any_cast<void *>(all_information[4]), any_cast<int>(all_information[5]));
       break;
     }
@@ -533,7 +623,31 @@ void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
   sendPacket("IPv4", std::move(pkt));
 }
 
-
+void TCPAssignment::Write_and_Send_pkt_have_payloaod(std::any pkt_variable){
+  
+  array<any,10> pkt_vector = any_cast<array<any,10>>(pkt_variable);
+  int length_payload = any_cast<int>(pkt_vector[9]);
+  Packet pkt (packet_size + length_payload);
+  pkt.writeData(tcp_start-8, any_cast<uint32_t *>(pkt_vector[0]), 4);
+  pkt.writeData(tcp_start-4, any_cast<uint32_t *>(pkt_vector[1]), 4);
+  pkt.writeData(tcp_start,   any_cast<uint16_t *>(pkt_vector[2]), 2);
+  pkt.writeData(tcp_start+2, any_cast<uint16_t *>(pkt_vector[3]), 2);
+  pkt.writeData(tcp_start+4, any_cast<uint32_t *>(pkt_vector[4]), 4);
+  pkt.writeData(tcp_start+8, any_cast<uint32_t *>(pkt_vector[5]), 4);
+  pkt.writeData(tcp_start+12, any_cast<uint16_t *>(pkt_vector[6]), 2);
+  pkt.writeData(tcp_start+14, any_cast<uint16_t *>(pkt_vector[7]), 2); //window
+  pkt.writeData(tcp_start+20, any_cast<uint8_t *>(pkt_vector[8]), length_payload); //자료형 맞게 변환했는지 모름
+  
+  //checksum
+  uint8_t temp[20+length_payload];
+  pkt.readData(tcp_start, &temp, 20+length_payload);
+  uint16_t checksum = NetworkUtil::tcp_sum(*(any_cast<uint32_t *>(pkt_vector[0])), 
+  *(any_cast<uint32_t *>(pkt_vector[1])),temp,20+length_payload); //
+  checksum = ~checksum;
+  checksum = htons(checksum);
+  pkt.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+  sendPacket("IPv4", std::move(pkt));
+}
 
 } // namespace E
 
