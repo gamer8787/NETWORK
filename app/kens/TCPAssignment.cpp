@@ -38,7 +38,7 @@ int not_send_index = 0;       //nextseqnum
 int written_index = 0;
 uint32_t write_ack = 0;
 uint32_t write_seq = 0;
-
+int is_handshake = 0;
 
 
 
@@ -55,7 +55,7 @@ typedef list<uint16_t> complete_listen_que ;
 typedef pair<ready_listen_que,complete_listen_que> listen_que;
 typedef tuple<uint32_t, uint16_t, uint32_t,uint16_t> Four_tuple;
 
-Four_tuple accept_send_ssdd;
+Four_tuple accept_send_ssdd; //하드 카피
 int ssdd_defined = 0;
 
 #define seconds pow(10,9)
@@ -232,8 +232,8 @@ void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
   send_not_acked_index = 0; 
   not_send_index = 0;       
   written_index = 0;
-  write_ack = 0;
-  write_seq = 0;
+  //write_ack = 0; 
+  //write_seq = 0; 
   if (bind_map.find(server_pf) == bind_map.end()) {
       printf("bind_map not find!\n");
      return returnSystemCall(syscallUUID, -1); 
@@ -279,7 +279,6 @@ void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
   //socksock->sin_addr.s_addr =ap1.first; <-??
   socksock->sin_port =ap1.second;
   *param3_ptr = sizeof(*socksock);
-  printf("accept %d %d\n", ntohs(server_address_port.second), htons(ap1.second));
   return returnSystemCall(syscallUUID, sock_fd);
 }
 
@@ -367,49 +366,28 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int param1, void *p
   //if(written_index - send_not_acked_index + param2 <= BUF_SIZE){     
     pid_fd pf1 = make_pair(pid, param1);
     
-    /*
-    if (connect_map.find(pf1) == connect_map.end()) {
-      printf("no find!\n");
-      return returnSystemCall(syscallUUID, -1); 
-    }
-    */
-    //printf("in write %d %d\n", sender_window - (not_send_index - send_not_acked_index) , written_index - not_send_index);
+    printf("in write %d %d\n", sender_window - (not_send_index - send_not_acked_index) , written_index - not_send_index);
     int sended_in_function =  min(sender_window - (not_send_index - send_not_acked_index) , written_index - not_send_index);
 
     Four_tuple ssdd;
     if (connect_map.find(pf1) == connect_map.end()) {
-      printf("no find!\n");
       ssdd = accept_send_ssdd;
     }
     else{
       ssdd = connect_map[pf1];
     }
     
-    uint32_t src_ip = get<0>(ssdd);
-    uint16_t source_port = get<1>(ssdd);
-    uint32_t dest_ip = get<2>(ssdd);
-    uint16_t dest_port = get<3>(ssdd);
-    
-    /*
-    printf("1111\n");
-    uint32_t src_ip = me_addr.sin_addr.s_addr;
-    printf("1111\n");
-    uint16_t source_port = me_addr.sin_port;
-    printf("1111\n");
-    uint32_t dest_ip = peer_addr.sin_addr.s_addr;
-    printf("1111\n");
-    uint16_t dest_port = peer_addr.sin_port;
-    printf("1111\n");
-    */
-    printf("%d %d %d %d\n",src_ip, ntohs(source_port), dest_ip, ntohs(dest_port));
+    uint32_t src_ip = get<0>(ssdd); uint16_t source_port = get<1>(ssdd);
+    uint32_t dest_ip = get<2>(ssdd); uint16_t dest_port = get<3>(ssdd);
+
     uint16_t flag = htons(0x5010); //ack
     uint8_t *buffer_ptr = &send_buffer[not_send_index];
     uint16_t sender_window2 = htons(sender_window);
+    printf("write seq ,write_ack is %d, %d\n", ntohl(write_seq), ntohl(write_ack));
     std::array<any, 10> pkt_variable = {&src_ip, &dest_ip, &source_port, &dest_port
     ,&write_seq, &write_ack, &flag, &sender_window2, buffer_ptr , sended_in_function};
     Write_and_Send_pkt_have_payloaod(pkt_variable);
     write_seq = htonl(ntohl(write_seq)+sended_in_function);
-    printf("3333\n");
     not_send_index += sended_in_function; //written_index 만큼 send했으므로
     return returnSystemCall(syscallUUID, param2);
   }
@@ -504,8 +482,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   }
   //////
   
+  
+  //////
   switch(real_flag){
     case 0b00000010:{ //SYN, HANDSHAKE 첫 단계 (서버)
+        is_handshake =1;
         address_port server_address_port;
         address_port INADDR_address_port = make_pair(htonl(INADDR_ANY),dest_port); //서버가 bind를 inaddr로 만들었을때의 pair
         address_port dest_address_port = make_pair(dest_ip,dest_port);             //서버가 bind를 특정ip로 만들었을때의 pair
@@ -538,8 +519,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         else{
           listen_que_map[server_address_port].first.push_back(src_port);
         }
-        write_seq = new_seq_num;
-        write_ack = new_ack_num;
+        
         
         ////첫 ack정의
         before_ack_num = ack_num;
@@ -578,8 +558,15 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         }
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
-        send_not_acked_index += ntohl(ack_num - before_ack_num);
+        send_not_acked_index += (ntohl(ack_num) - ntohl(before_ack_num));
         //printf("ack num -before ack num is %d\n",ack_num - before_ack_num);
+        ////write 함수에 쓰일 첫 seq,ack,sender_window 정의
+        if(is_handshake==1){
+          write_seq = ack_num;
+          write_ack = seq_num;
+          is_handshake=0;
+        }
+        //printf("in arrived write seq write ack is %d %d\n", ntohl(write_seq), ntohl(write_ack));
         before_ack_num = ack_num;
 
       break;
@@ -596,16 +583,26 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       break;
   }
   if(written_index == not_send_index){
+    /*
+    if(third_handshake == 1 && real_flag == 16){ //accept단계에서 마지막 핸드쉐이크 받고 보낼 data 없으면 그냥 끝냄
+      printf("no send!!\n");
+      third_handshake = 0;
+      return; 
+    }
+    */
+    printf("in if\n");
     array<any, 8> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port ,&new_seq_num, &new_ack_num, &new_flag, &window};
     Write_and_Send_pkt(pkt_variable);
   }
   
   else{ //written된게 있으나 not_send 된게 있으면 보냄
-    printf("fk\n");
     if(ntohl(ack_num) < ntohl(write_seq)){ //등호 or 부등호
       return;
     }
+    printf("sender_window not_send_index send_not_acked_index written_index\n");
+    printf("%d %d %d %d\n",sender_window, not_send_index, send_not_acked_index, written_index);
     int num = min(sender_window - (not_send_index - send_not_acked_index), written_index - not_send_index);
+    printf("num is %d\n",num);
     uint8_t will_send[num];
     uint8_t *ptr = will_send;
     for(int k=0;k< num; k++){
