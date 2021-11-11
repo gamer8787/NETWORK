@@ -39,12 +39,7 @@ int written_index = 0;
 uint32_t write_ack = 0;
 uint32_t write_seq = 0;
 int is_handshake = 0;
-
-
-
 uint32_t before_ack_num;
-int is_ack_first;
-
 vector<any> write_information;
 
 typedef pair<int, int>  pid_fd;
@@ -162,8 +157,6 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1,
   send_not_acked_index = 0; 
   not_send_index = 0;       
   written_index = 0;
-  write_ack = 0;
-  write_seq = 0;
   
   cout << "connect!" << endl;
   struct sockaddr_in* socksock = (sockaddr_in *)param2_ptr;
@@ -468,7 +461,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
     new_ack_num =seq_num;
   }
   uint16_t new_flag;
-  //printf("flag is %x seq_num is %x\n",real_flag, ntohs(seq_num));
   printf("flag is %x \n",real_flag);
   sender_window = ntohs(window);
   //////read 관련 
@@ -499,14 +491,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
             
           }
         }
-        accept_send_ssdd = make_tuple(dest_ip, dest_port, src_ip, src_port);
-        //pid_fd pf1 = make_pair(pid, param1);
+        accept_send_ssdd = make_tuple(dest_ip, dest_port, src_ip, src_port); //write에 쓰일 4tuple 억지로 정의
         
 
         listen_is_connected_map[server_address_port]=1; //클라로부터 커넥트가 왔으므로 1로 설정
         new_flag = htons(0x5012);
         new_seq_num = std::rand();//
-        //cout << "listen size is " << listen_room_size_map[server_address_port] << endl;
         if(listen_room_size_map[server_address_port]==listen_que_map[server_address_port].first.size()){ //ready_listen_que의 크기가 대기열 크기랑 같을 때 full
           if(listen_room_size_map[server_address_port]==0){ //대기열 크기가 0일 때 <= listen을 안 하고 연결하는 경우(handshake 마지막 case)
             break;
@@ -559,14 +549,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
         send_not_acked_index += (ntohl(ack_num) - ntohl(before_ack_num));
-        //printf("ack num -before ack num is %d\n",ack_num - before_ack_num);
-        ////write 함수에 쓰일 첫 seq,ack,sender_window 정의
+        
         if(is_handshake==1){
           write_seq = ack_num;
           write_ack = seq_num;
           is_handshake=0;
         }
-        //printf("in arrived write seq write ack is %d %d\n", ntohl(write_seq), ntohl(write_ack));
         before_ack_num = ack_num;
 
       break;
@@ -583,26 +571,15 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       break;
   }
   if(written_index == not_send_index){
-    /*
-    if(third_handshake == 1 && real_flag == 16){ //accept단계에서 마지막 핸드쉐이크 받고 보낼 data 없으면 그냥 끝냄
-      printf("no send!!\n");
-      third_handshake = 0;
-      return; 
-    }
-    */
-    printf("in if\n");
     array<any, 8> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port ,&new_seq_num, &new_ack_num, &new_flag, &window};
     Write_and_Send_pkt(pkt_variable);
   }
   
   else{ //written된게 있으나 not_send 된게 있으면 보냄
-    if(ntohl(ack_num) < ntohl(write_seq)){ //등호 or 부등호
+    if(ntohl(ack_num) < ntohl(write_seq)){ //
       return;
     }
-    printf("sender_window not_send_index send_not_acked_index written_index\n");
-    printf("%d %d %d %d\n",sender_window, not_send_index, send_not_acked_index, written_index);
     int num = min(sender_window - (not_send_index - send_not_acked_index), written_index - not_send_index);
-    printf("num is %d\n",num);
     uint8_t will_send[num];
     uint8_t *ptr = will_send;
     for(int k=0;k< num; k++){
