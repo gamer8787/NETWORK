@@ -45,16 +45,14 @@ map<uint32_t, send_receive_time> timer_map; //ack num을 기준으로 보내는 
 #define ALPHA 0.125
 #define BETA 0.25
 
-uint64_t time=0;
-uint64_t EstimatedRTT = 0.1 * seconds;
-uint64_t SampleRTT = 0 * seconds;
-uint64_t DevRTT = 0.1 * seconds;
-uint64_t TimeoutInterval = 0.5 * seconds;
+Time time=0;
+Time EstimatedRTT = 0.1 * seconds;
+Time SampleRTT = 0 * seconds;
+Time DevRTT = 0.1 * seconds;
+Time TimeoutInterval = 0.5 * seconds;
 
 vector<uint32_t> ack_vector;
 vector<any> retransmit_pkt;
-////for test
-int connect =0;
 
 
 
@@ -146,7 +144,10 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, int param1,
 
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1, 
    sockaddr*param2_ptr,socklen_t param3){
-  connect =1;
+  EstimatedRTT = 0.1 * seconds;
+  SampleRTT = 0 * seconds;
+  DevRTT = 0 * seconds;
+  TimeoutInterval = 0.1 * seconds;
   vector<uint32_t> ack_vector2;
   ack_vector = ack_vector2;
 
@@ -179,8 +180,6 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1,
   std::array<any, 8> pkt_variable = {&src_ip_32, &dest_ip_32, &source_port, &dest_port
   ,&seq_num, &ack_num, &flag, &window};
   
-  time = HostModule::getCurrentTime();
-  timer_map[ntohl(seq_num)+1].first = time; //hand shake이므로 받을 ack은 seq+1이고 거기에 저장
   Write_and_Send_pkt(pkt_variable);
 
   
@@ -220,7 +219,10 @@ void TCPAssignment::syscall_listen(UUID syscallUUID,int pid, int param1,
 
 void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
     		sockaddr* param2_ptr, socklen_t* param3_ptr){
-  connect =0;
+  EstimatedRTT = 0.1 * seconds;
+  SampleRTT = 0 * seconds;
+  DevRTT = 0 * seconds;
+  TimeoutInterval = 0.1 * seconds;
   cout << "accept!!" << endl; 
   pid_fd server_pf=make_pair(pid,param1);
   
@@ -338,7 +340,6 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
 }
 
 void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
-  
   printf("arrived\n");
   uint32_t src_ip;
   uint32_t dest_ip;
@@ -360,14 +361,17 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   packet.readData(tcp_start+14, &window, 2);
   packet.readData(tcp_start+16, &checksum, 2);
 
-  if(connect==1){
-    time = HostModule::getCurrentTime();
-    timer_map[ntohl(ack_num)].second = time;//패킷을 보낸 시간과 받은 시간을 ack num으로 구분해서 받음.
-    SampleRTT = timer_map[ntohl(ack_num)].second - timer_map[ntohl(ack_num)].first;
-    EstimatedRTT = (1-ALPHA) * EstimatedRTT + ALPHA * SampleRTT;
-    DevRTT = (1-BETA) * DevRTT + BETA * max(SampleRTT - EstimatedRTT, EstimatedRTT - SampleRTT);
-    TimeoutInterval = EstimatedRTT + 4*DevRTT;
-  }
+  time = HostModule::getCurrentTime();
+  timer_map[ntohl(ack_num)].second = time;//패킷을 보낸 시간과 받은 시간을 ack num으로 구분해서 받음.
+  
+  SampleRTT = timer_map[ntohl(ack_num)].second - timer_map[ntohl(ack_num)].first;
+  EstimatedRTT = (1-ALPHA) * EstimatedRTT + ALPHA * SampleRTT;
+  Time t = (SampleRTT > EstimatedRTT) ? (SampleRTT-EstimatedRTT) : (EstimatedRTT-SampleRTT);
+  DevRTT = (1-BETA) * DevRTT + BETA * t;
+  cout << "time " <<time <<endl;
+  cout << "send time " <<timer_map[ntohl(ack_num)].first <<endl;
+  cout << "sample RTT " << SampleRTT << endl << "Estimated RTT " << EstimatedRTT << endl << "DevRTT " <<DevRTT <<endl;
+  TimeoutInterval = EstimatedRTT + 4*DevRTT;
 
   ack_vector.push_back(ntohl(ack_num));   //받은 ack을 기록
 
@@ -451,10 +455,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   }
   array<any, 8> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port
   ,&new_seq_num, &new_ack_num, &new_flag, &window};
-  if(connect==1 && real_flag == 0b00010010){
-    time = HostModule::getCurrentTime();
-    timer_map[ntohl(seq_num)].first = time; //hand shake이므로 받을 ack은 seq+1이고 거기에 저장
-  }
   Write_and_Send_pkt(pkt_variable);
 } 
 
@@ -497,6 +497,7 @@ void TCPAssignment::timerCallback(std::any payload) {
 }
 
 void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
+  //cout << "send_pkt " <<endl;
   Packet pkt (packet_size);
   array<any,8> pkt_vector = any_cast<array<any,8>>(pkt_variable);
 
@@ -525,15 +526,14 @@ void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
   checksum = ~checksum;
   checksum = htons(checksum);
   pkt.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+  
+  time = HostModule::getCurrentTime();
+  timer_map[ntohl(seq_num)+1].first = time; //hand shake이므로 받을 ack은 seq+1이고 거기에 저장
   sendPacket("IPv4", std::move(pkt));
 
-  //retransmisison
-  if(connect ==0){
-    return;
-  }
+
+  //cout << " timeout is " << TimeoutInterval <<endl;
   uint32_t expected_ack = ntohl(seq_num)+1; //handshake이므로 단순히 +1
-  //std::array<any, 8> pkt_variable2 = {&src_ip, &dest_ip, &source_port, &dest_port,
-  //&seq_num, &ack_num, &flag, &window};
   if(find(ack_vector.begin(),ack_vector.end(), expected_ack)==ack_vector.end()){ //원하는 ack이 없으면
     vector<any> retransmit_pkt2;
     retransmit_pkt = retransmit_pkt2;
@@ -546,9 +546,7 @@ void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
     retransmit_pkt.push_back(ack_num);
     retransmit_pkt.push_back(flag);
     retransmit_pkt.push_back(window);
-    printf("5555\n");
     TimerModule::addTimer(retransmit_pkt ,TimeoutInterval);
-    printf("6666\n");
   }
 }
 
