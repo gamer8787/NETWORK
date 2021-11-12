@@ -63,6 +63,26 @@ map<address_port , int > listen_room_size_map;
 map<address_port , int > listen_is_connected_map;
 map<pid_fd , Four_tuple > connect_map;
 
+/////unreliable variable
+typedef pair<uint64_t, uint64_t> send_receive_time;
+typedef map<uint32_t, send_receive_time> timer_map; //ack num
+
+#define ALPHA 0.125
+#define BETA 0.25
+struct Four_tuple_struct 
+{ 
+  Time time=0;
+  Time EstimatedRTT = 0.1 * seconds;
+  Time SampleRTT = 0 * seconds;
+  Time DevRTT = 0.1 * seconds;
+  Time TimeoutInterval = 0.1 * seconds;
+  timer_map Timer;
+  vector<uint32_t> ack_vector;
+};
+
+map<Four_tuple , Four_tuple_struct > Four_tuple_map;
+vector<any> retransmit_pkt;
+////
 TCPAssignment::TCPAssignment(Host &host)
     : HostModule("TCP", host), RoutingInfoInterface(host),
       SystemCallInterface(AF_INET, IPPROTO_TCP, host),
@@ -157,7 +177,7 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1,
   send_not_acked_index = 0; 
   not_send_index = 0;       
   written_index = 0;
-  
+  ////////
   cout << "connect!" << endl;
   struct sockaddr_in* socksock = (sockaddr_in *)param2_ptr;
   ipv4_t dest_ip ;  
@@ -186,12 +206,18 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1,
   window = htons(window);
   std::array<any, 8> pkt_variable = {&src_ip_32, &dest_ip_32, &source_port, &dest_port
   ,&seq_num, &ack_num, &flag, &window};
+
   Write_and_Send_pkt(pkt_variable);
 
   pid_fd pf1 = make_pair(pid, param1);
 
   Four_tuple ssdd= make_tuple(src_ip_32, source_port, dest_ip_32, dest_port);
   connect_map.insert(pair<pid_fd, Four_tuple>(pf1, ssdd));
+
+  Four_tuple_struct Four_tuple_struct1; //초기화
+  Four_tuple_map[ssdd] = Four_tuple_struct1;
+  Write_and_Send_pkt(pkt_variable);
+
   returnSystemCall(syscallUUID, 0);
   
 }
@@ -451,8 +477,10 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   packet.readData(tcp_start+8, &ack_num, 4);
   packet.readData(tcp_start+12, &flag, 2);
   packet.readData(tcp_start+14, &window, 2);
-  //printf("window is %d\n",ntohs(window));
   packet.readData(tcp_start+16, &checksum, 2);
+
+  Four_tuple ssdd= make_tuple(dest_ip, dest_port, src_ip, src_port);
+
   uint8_t real_flag = ntohs(flag) & 0xff;
   std::srand(5000);  
   uint32_t new_seq_num;
@@ -478,6 +506,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   //////
   switch(real_flag){
     case 0b00000010:{ //SYN, HANDSHAKE 첫 단계 (서버)
+        Four_tuple_struct Four_tuple_struct1; //초기화
+        Four_tuple_map[ssdd] = Four_tuple_struct1;
+
         is_handshake =1;
         address_port server_address_port;
         address_port INADDR_address_port = make_pair(htonl(INADDR_ANY),dest_port); //서버가 bind를 inaddr로 만들었을때의 pair
@@ -570,6 +601,18 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       //perror("not yet\n");
       break;
   }
+  Time time = HostModule::getCurrentTime();
+  
+  Four_tuple_map[ssdd].Timer[ntohl(ack_num)].second = time; //map 2개
+  if(real_flag != 0b00000010){ //처음아닐때만
+    Four_tuple_map[ssdd].SampleRTT = time - Four_tuple_map[ssdd].Timer[ntohl(ack_num)].first;
+  }
+  Four_tuple_map[ssdd].EstimatedRTT = (1-ALPHA) * Four_tuple_map[ssdd].EstimatedRTT + ALPHA * Four_tuple_map[ssdd].SampleRTT;
+  Time t = (Four_tuple_map[ssdd].SampleRTT > Four_tuple_map[ssdd].EstimatedRTT) ? (Four_tuple_map[ssdd].SampleRTT-Four_tuple_map[ssdd].EstimatedRTT) : (Four_tuple_map[ssdd].EstimatedRTT-Four_tuple_map[ssdd].SampleRTT);
+  Four_tuple_map[ssdd].DevRTT = (1-BETA) * Four_tuple_map[ssdd].DevRTT + BETA * t;
+  Four_tuple_map[ssdd].TimeoutInterval = Four_tuple_map[ssdd].EstimatedRTT + 4*Four_tuple_map[ssdd].DevRTT;
+  Four_tuple_map[ssdd].ack_vector.push_back(ntohl(ack_num));   //받은 ack을 기록
+
   if(written_index == not_send_index){
     array<any, 8> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port ,&new_seq_num, &new_ack_num, &new_flag, &window};
     Write_and_Send_pkt(pkt_variable);
@@ -597,6 +640,48 @@ void TCPAssignment::timerCallback(std::any payload) {
   
   vector<any> all_information = any_cast<vector<any>>(payload);
   switch (any_cast<int>(all_information[0])) {
+    case -2:{
+      uint32_t src_ip = (any_cast<uint32_t >(all_information[1]));
+      uint32_t dest_ip = (any_cast<uint32_t >(all_information[2]));
+      uint16_t source_port = (any_cast<uint16_t >(all_information[3]));
+      uint16_t dest_port = (any_cast<uint16_t >(all_information[4]));
+      uint32_t seq_num =(any_cast<uint32_t >(all_information[5]));
+      uint32_t ack_num =(any_cast<uint32_t >(all_information[6]));
+      uint16_t flag = (any_cast<uint16_t >(all_information[7]));
+      uint16_t window = (any_cast<uint16_t >(all_information[8]));
+      uint8_t *payload_ptr = (any_cast<uint8_t *>(all_information[9]));
+      int length_payload = (any_cast<int >(all_information[10]));
+
+      uint32_t expected_ack = ntohl(seq_num)+length_payload; //handshake이므로 단순히 +1
+
+      std::array<any, 10> pkt_variable = {&src_ip, &dest_ip, &source_port, &dest_port
+        ,&seq_num, &ack_num, &flag, &window, payload_ptr, length_payload};
+      Four_tuple ssdd= make_tuple(src_ip, source_port, dest_ip, dest_port);
+      if(find(Four_tuple_map[ssdd].ack_vector.begin(),Four_tuple_map[ssdd].ack_vector.end(), expected_ack)==Four_tuple_map[ssdd].ack_vector.end()){ //원하는 ack이 없으면
+        Write_and_Send_pkt_have_payloaod(pkt_variable);
+      }
+      break;
+    }
+    case -1:{
+      uint32_t src_ip = (any_cast<uint32_t >(all_information[1]));
+      uint32_t dest_ip = (any_cast<uint32_t >(all_information[2]));
+      uint16_t source_port = (any_cast<uint16_t >(all_information[3]));
+      uint16_t dest_port = (any_cast<uint16_t >(all_information[4]));
+      uint32_t seq_num =(any_cast<uint32_t >(all_information[5]));
+      uint32_t ack_num =(any_cast<uint32_t >(all_information[6]));
+      uint16_t flag = (any_cast<uint16_t >(all_information[7]));
+      uint16_t window = (any_cast<uint16_t >(all_information[8]));
+      
+      uint32_t expected_ack = ntohl(seq_num)+1; //handshake이므로 단순히 +1
+
+      std::array<any, 8> pkt_variable = {&src_ip, &dest_ip, &source_port, &dest_port
+        ,&seq_num, &ack_num, &flag, &window};
+      Four_tuple ssdd= make_tuple(src_ip, source_port, dest_ip, dest_port);
+      if(find(Four_tuple_map[ssdd].ack_vector.begin(),Four_tuple_map[ssdd].ack_vector.end(), expected_ack)==Four_tuple_map[ssdd].ack_vector.end()){ //원하는 ack이 없으면
+        Write_and_Send_pkt(pkt_variable);
+      }
+      break;
+    }
     case 0: //accept 함수
       syscall_accept(any_cast<UUID>(all_information[1]), any_cast<int>(all_information[2])
       , any_cast<int>(all_information[3]), any_cast<sockaddr*>(all_information[4]), any_cast<socklen_t*>(all_information[5]));
@@ -622,14 +707,24 @@ void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
 
   Packet pkt (packet_size);
   array<any,8> pkt_vector = any_cast<array<any,8>>(pkt_variable);
-  pkt.writeData(tcp_start-8, any_cast<uint32_t *>(pkt_vector[0]), 4);
-  pkt.writeData(tcp_start-4, any_cast<uint32_t *>(pkt_vector[1]), 4);
-  pkt.writeData(tcp_start,   any_cast<uint16_t *>(pkt_vector[2]), 2);
-  pkt.writeData(tcp_start+2, any_cast<uint16_t *>(pkt_vector[3]), 2);
-  pkt.writeData(tcp_start+4, any_cast<uint32_t *>(pkt_vector[4]), 4);
-  pkt.writeData(tcp_start+8, any_cast<uint32_t *>(pkt_vector[5]), 4);
-  pkt.writeData(tcp_start+12, any_cast<uint16_t *>(pkt_vector[6]), 2);
-  pkt.writeData(tcp_start+14, any_cast<uint16_t *>(pkt_vector[7]), 2); //window
+  
+  uint32_t src_ip = *(any_cast<uint32_t *>(pkt_vector[0]));
+  uint32_t dest_ip = *(any_cast<uint32_t *>(pkt_vector[1]));
+  uint16_t source_port = *(any_cast<uint16_t *>(pkt_vector[2]));
+  uint16_t dest_port = *(any_cast<uint16_t *>(pkt_vector[3]));
+  uint32_t seq_num =*(any_cast<uint32_t *>(pkt_vector[4]));
+  uint32_t ack_num =*(any_cast<uint32_t *>(pkt_vector[5]));
+  uint16_t flag = *(any_cast<uint16_t *>(pkt_vector[6]));
+  uint16_t window = *(any_cast<uint16_t *>(pkt_vector[7]));
+
+  pkt.writeData(tcp_start-8, &src_ip, 4);
+  pkt.writeData(tcp_start-4, &dest_ip, 4);
+  pkt.writeData(tcp_start,   &source_port, 2);
+  pkt.writeData(tcp_start+2, &dest_port, 2);
+  pkt.writeData(tcp_start+4, &seq_num, 4);
+  pkt.writeData(tcp_start+8, &ack_num, 4);
+  pkt.writeData(tcp_start+12, &flag, 2);
+  pkt.writeData(tcp_start+14, &window, 2); //window
 
   //checksum
   uint8_t temp[20];
@@ -639,7 +734,28 @@ void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
   checksum = ~checksum;
   checksum = htons(checksum);
   pkt.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+  //
+
+  Four_tuple ssdd= make_tuple(src_ip, source_port, dest_ip, dest_port);
+  Time time = HostModule::getCurrentTime();
+  Four_tuple_map[ssdd].Timer[ntohl(seq_num)+1].first = time; //hand shake이므로 받을 ack은 seq+1이고 거기에 저장
   sendPacket("IPv4", std::move(pkt));
+
+  uint32_t expected_ack = ntohl(seq_num)+1; //handshake이므로 단순히 +1
+  if(find(Four_tuple_map[ssdd].ack_vector.begin(),Four_tuple_map[ssdd].ack_vector.end(), expected_ack)==Four_tuple_map[ssdd].ack_vector.end()){ //원하는 ack이 없으면
+    vector<any> retransmit_pkt2;
+    retransmit_pkt = retransmit_pkt2;
+    retransmit_pkt.push_back(-1);
+    retransmit_pkt.push_back(src_ip);
+    retransmit_pkt.push_back(dest_ip);
+    retransmit_pkt.push_back(source_port);
+    retransmit_pkt.push_back(dest_port);
+    retransmit_pkt.push_back(seq_num);
+    retransmit_pkt.push_back(ack_num);
+    retransmit_pkt.push_back(flag);
+    retransmit_pkt.push_back(window);
+    TimerModule::addTimer(retransmit_pkt ,Four_tuple_map[ssdd].TimeoutInterval);
+  }
 }
 
 void TCPAssignment::Write_and_Send_pkt_have_payloaod(std::any pkt_variable){
@@ -647,14 +763,25 @@ void TCPAssignment::Write_and_Send_pkt_have_payloaod(std::any pkt_variable){
   array<any,10> pkt_vector = any_cast<array<any,10>>(pkt_variable);
   int length_payload = any_cast<int>(pkt_vector[9]);
   Packet pkt (packet_size + length_payload);
-  pkt.writeData(tcp_start-8, any_cast<uint32_t *>(pkt_vector[0]), 4);
-  pkt.writeData(tcp_start-4, any_cast<uint32_t *>(pkt_vector[1]), 4);
-  pkt.writeData(tcp_start,   any_cast<uint16_t *>(pkt_vector[2]), 2);
-  pkt.writeData(tcp_start+2, any_cast<uint16_t *>(pkt_vector[3]), 2);
-  pkt.writeData(tcp_start+4, any_cast<uint32_t *>(pkt_vector[4]), 4);
-  pkt.writeData(tcp_start+8, any_cast<uint32_t *>(pkt_vector[5]), 4);
-  pkt.writeData(tcp_start+12, any_cast<uint16_t *>(pkt_vector[6]), 2);
-  pkt.writeData(tcp_start+14, any_cast<uint16_t *>(pkt_vector[7]), 2); //window
+
+  uint32_t src_ip = *(any_cast<uint32_t *>(pkt_vector[0]));
+  uint32_t dest_ip = *(any_cast<uint32_t *>(pkt_vector[1]));
+  uint16_t source_port = *(any_cast<uint16_t *>(pkt_vector[2]));
+  uint16_t dest_port = *(any_cast<uint16_t *>(pkt_vector[3]));
+  uint32_t seq_num =*(any_cast<uint32_t *>(pkt_vector[4]));
+  uint32_t ack_num =*(any_cast<uint32_t *>(pkt_vector[5]));
+  uint16_t flag = *(any_cast<uint16_t *>(pkt_vector[6]));
+  uint16_t window = *(any_cast<uint16_t *>(pkt_vector[7]));
+  uint8_t *payload_ptr = any_cast<uint8_t *>(pkt_vector[8]);
+
+  pkt.writeData(tcp_start-8, &src_ip, 4);
+  pkt.writeData(tcp_start-4, &dest_ip, 4);
+  pkt.writeData(tcp_start,   &source_port, 2);
+  pkt.writeData(tcp_start+2, &dest_port, 2);
+  pkt.writeData(tcp_start+4, &seq_num, 4);
+  pkt.writeData(tcp_start+8, &ack_num, 4);
+  pkt.writeData(tcp_start+12, &flag, 2);
+  pkt.writeData(tcp_start+14, &window, 2); //window
   pkt.writeData(tcp_start+20, any_cast<uint8_t *>(pkt_vector[8]), length_payload); //자료형 맞게 변환했는지 모름
   
   //checksum
@@ -665,6 +792,32 @@ void TCPAssignment::Write_and_Send_pkt_have_payloaod(std::any pkt_variable){
   checksum = ~checksum;
   checksum = htons(checksum);
   pkt.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+  //
+
+  Four_tuple ssdd= make_tuple(src_ip, source_port, dest_ip, dest_port);
+  Time time = HostModule::getCurrentTime();
+  Four_tuple_map[ssdd].Timer[ntohl(seq_num)+length_payload].first = time; //hand shake이므로 받을 ack은 seq+1이고 거기에 저장
+  sendPacket("IPv4", std::move(pkt));
+
+  uint32_t expected_ack = ntohl(seq_num)+length_payload; //pay_load만큼 +
+  if(find(Four_tuple_map[ssdd].ack_vector.begin(),Four_tuple_map[ssdd].ack_vector.end(), expected_ack)==Four_tuple_map[ssdd].ack_vector.end()){ //원하는 ack이 없으면
+    vector<any> retransmit_pkt2;
+    retransmit_pkt = retransmit_pkt2;
+    retransmit_pkt.push_back(-2);
+    retransmit_pkt.push_back(src_ip);
+    retransmit_pkt.push_back(dest_ip);
+    retransmit_pkt.push_back(source_port);
+    retransmit_pkt.push_back(dest_port);
+    retransmit_pkt.push_back(seq_num);
+    retransmit_pkt.push_back(ack_num);
+    retransmit_pkt.push_back(flag);
+    retransmit_pkt.push_back(window);
+    retransmit_pkt.push_back(payload_ptr);
+    retransmit_pkt.push_back(length_payload);
+    TimerModule::addTimer(retransmit_pkt ,Four_tuple_map[ssdd].TimeoutInterval);
+  }
+
+
   sendPacket("IPv4", std::move(pkt));
 }
 
