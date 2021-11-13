@@ -333,6 +333,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
 
 void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   printf("arrived\n");
+
   uint32_t src_ip;
   uint32_t dest_ip;
   uint16_t src_port;
@@ -353,17 +354,17 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   packet.readData(tcp_start+12, &flag, 2);
   packet.readData(tcp_start+14, &window, 2);
   packet.readData(tcp_start+16, &checksum, 2);
-  cout << "seq is "<< ntohl(seq_num) << endl;
-  cout << "ack is "<< ntohl(ack_num) << endl;
   Four_tuple ssdd= make_tuple(dest_ip, dest_port, src_ip, src_port);
 
   uint8_t real_flag = ntohs(flag) & 0xff;
   std::srand(5000);  
   uint32_t new_seq_num;
   uint32_t new_ack_num=htonl(ntohl(seq_num)+1); 
+  
   if(real_flag == 0b00010000){ //ack일때는 그대로
     new_ack_num =seq_num;
   }
+  
   uint16_t new_flag;
   //printf("flag is %x src_port is %x\n",real_flag, src_port);
   //printf("flag is %x \n",real_flag);
@@ -387,6 +388,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         listen_is_connected_map[server_address_port]=1; //클라로부터 커넥트가 왔으므로 1로 설정
         new_flag = htons(0x5012);
         new_seq_num = std::rand();//
+        expected_ack = ntohl(new_seq_num)+1;
         //cout << "listen size is " << listen_room_size_map[server_address_port] << endl;
         if(listen_room_size_map[server_address_port]==listen_que_map[server_address_port].first.size()){ //ready_listen_que의 크기가 대기열 크기랑 같을 때 full
           if(listen_room_size_map[server_address_port]==0){ //대기열 크기가 0일 때 <= listen을 안 하고 연결하는 경우(handshake 마지막 case)
@@ -399,13 +401,13 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         else{
           listen_que_map[server_address_port].first.push_back(src_port);
         }
-        expected_ack = ntohl(seq_num)+1;
+        
       break;
     }
     case 0b00010010:  //SYN + ACK, HANDSHAKE 두 단계 (클라)
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
-        expected_ack = ntohl(seq_num);
+        expected_ack = ntohl(new_seq_num);
       break;
     case 0b00010000:{  //ACK, HANDSHAKE 세 단계 (서버)
         address_port server_address_port;
@@ -431,13 +433,13 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
-        expected_ack = ntohl(seq_num);
+        expected_ack = ntohl(new_seq_num);
       break;
   }
     case 0b00010001: //FIN + ACK
         new_flag = htons(0x5010);
-        new_seq_num = std::rand();//
-        expected_ack = ntohl(seq_num)+1;
+        new_seq_num = ack_num;//
+        expected_ack = 0; //ack 안와도 됨
         //return;
       break;
     default :    
@@ -459,8 +461,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   Four_tuple_map[ssdd].DevRTT = (1-BETA) * Four_tuple_map[ssdd].DevRTT + BETA * t;
   Four_tuple_map[ssdd].TimeoutInterval = Four_tuple_map[ssdd].EstimatedRTT + 4*Four_tuple_map[ssdd].DevRTT;
   Four_tuple_map[ssdd].ack_vector.push_back(ntohl(ack_num));   //받은 ack을 기록
-  cout << "new seq is "<< ntohl(new_seq_num) << endl;
-  cout << "new ack is "<< ntohl(new_ack_num) << endl;
+  //cout << "push ack is  "<<  ntohl(ack_num) << endl;
+  //cout << "new ack is "<< ntohl(new_ack_num) << endl;
+  //cout << "in packetarrived ack is"<<  expected_ack <<endl;
   array<any, 9> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port
   ,&new_seq_num, &new_ack_num, &new_flag, &window, &expected_ack};
   Write_and_Send_pkt(pkt_variable);
@@ -536,11 +539,19 @@ void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
   checksum = htons(checksum);
   pkt.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
   //
-
+  //cout << "in write and send expected_ack is "<<  expected_ack <<endl;
+  uint8_t real_flag = ntohs(flag) & 0xff;
+  if(expected_ack==0){ //fin+ack 은 무시
+    return;
+  }
   Four_tuple ssdd= make_tuple(src_ip, source_port, dest_ip, dest_port);
   Time time = HostModule::getCurrentTime();
   Four_tuple_map[ssdd].Timer[ntohl(seq_num)+1].first = time; //hand shake이므로 받을 ack은 seq+1이고 거기에 저장
   sendPacket("IPv4", std::move(pkt));
+  //return;
+  for (auto iter = Four_tuple_map[ssdd].ack_vector.begin() ; iter != Four_tuple_map[ssdd].ack_vector.end(); iter++) {
+    //cout << "ack is " <<  *iter <<endl;
+  }
 
   if(find(Four_tuple_map[ssdd].ack_vector.begin(),Four_tuple_map[ssdd].ack_vector.end(), expected_ack)==Four_tuple_map[ssdd].ack_vector.end()){ //원하는 ack이 없으면
     vector<any> retransmit_pkt2;
