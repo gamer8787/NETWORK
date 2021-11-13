@@ -32,8 +32,8 @@ public:
   virtual ~TCPAssignment();
   virtual void syscall_socket(UUID syscallUUID, int pid, int param1, int param2, int param3);
   virtual void syscall_close(UUID syscallUUID, int pid, int param1);
-  //virtual void syscall_read(UUID syscallUUID, int pid, int param1, void *ptr,int param3);
-  //virtual void syscall_write(UUID syscallUUID, int pid, int param1, void *ptr,int param3);
+  virtual void syscall_read(UUID syscallUUID, int pid, int param1, void *ptr,int param3);
+  virtual void syscall_write(UUID syscallUUID, int pid, int param1, void *ptr,int param3);
   virtual void syscall_bind(UUID syscallUUID, int pid, int param1_int, struct sockaddr * param2_ptr, socklen_t param3_int);
   virtual void syscall_getsockname(UUID syscallUUID, int pid, int param1,
     		sockaddr * param2_ptr, socklen_t* param3_ptr);
@@ -49,6 +49,7 @@ protected:
                               const SystemCallParameter &param) final;
   virtual void packetArrived(std::string fromModule, Packet &&packet) final;
   virtual void Write_and_Send_pkt(std::any pkt) final;
+  virtual void Write_and_Send_pkt_have_payloaod(std::any pkt) final;
 };
 
 class TCPAssignmentProvider {

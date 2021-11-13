@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <list>
+#include <unistd.h>
 namespace E {
 using namespace std;
 #define min(a,b) (((a)<(b))?(a):(b))
@@ -39,6 +40,28 @@ map<address_port , int > listen_room_size_map;
 map<address_port , int > listen_is_connected_map;
 map<pid_fd , Four_tuple > connect_map;
 
+//for test
+#define BUF_SIZE 2097152
+////read
+uint8_t recv_buffer[BUF_SIZE];
+int data_size=0;
+int read_index = 0;
+int recv_index = 0;
+vector<any> read_information;
+////write
+uint8_t send_buffer[BUF_SIZE];
+uint16_t sender_window = 0; //
+int send_not_acked_index = 0; //base
+int not_send_index = 0;       //nextseqnum
+int written_index = 0;
+uint32_t write_ack = 0;
+uint32_t write_seq = 0;
+int is_handshake = 0;
+uint32_t before_ack_num;
+vector<any> write_information;
+
+Four_tuple accept_send_ssdd; //하드 카피
+int ssdd_defined = 0;
 
 /////unreliable variable
 typedef pair<uint64_t, uint64_t> send_receive_time;
@@ -150,7 +173,15 @@ void TCPAssignment::syscall_getsockname(UUID syscallUUID, int pid, int param1,
 
 void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1, 
    sockaddr*param2_ptr,socklen_t param3){
-  cout << "connect!!\n" << endl;
+  recv_index = 0; //매 테스트 case 마다 일단 초기화
+  read_index = 0; //매 테스트 case 마다 일단 초기화
+  sender_window = 0; 
+  send_not_acked_index = 0; 
+  not_send_index = 0;       
+  written_index = 0;
+  ////////
+  //cout << "connect!" << endl;
+
   struct sockaddr_in* socksock = (sockaddr_in *)param2_ptr;
   ipv4_t dest_ip ;  
   for(int i=0;i<4;i++){
@@ -171,11 +202,12 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1,
   uint32_t seq_num =1;
   uint32_t ack_num =0;
   uint16_t flag = 0x5002; 
-  uint16_t window = 0x0000; 
+  uint16_t window = 0xc800;
   seq_num = htonl(seq_num);
   ack_num = htonl(ack_num);
   flag = htons(flag);
-  
+  window = htons(window);
+
   uint32_t expected_ack = ntohl(seq_num)+1;
   std::array<any, 9> pkt_variable = {&src_ip_32, &dest_ip_32, &source_port, &dest_port
   ,&seq_num, &ack_num, &flag, &window, &expected_ack};
@@ -218,6 +250,15 @@ void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
   cout << "accept!!" << endl; 
   pid_fd server_pf=make_pair(pid,param1);
   
+  recv_index = 0; //매 테스트 case 마다 일단 초기화
+  read_index = 0; //매 테스트 case 마다 일단 초기화
+  //sender_window = 0; 
+  send_not_acked_index = 0; 
+  not_send_index = 0;       
+  written_index = 0;
+  //write_ack = 0; 
+  //write_seq = 0;
+
   if (bind_map.find(server_pf) == bind_map.end()) {
       printf("bind_map not find!\n");
      return returnSystemCall(syscallUUID, -1); 
@@ -286,6 +327,97 @@ void TCPAssignment::syscall_getpeername(UUID syscallUUID, int pid, int param1,
   return returnSystemCall(syscallUUID, 0);
 }
 
+void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int param1, void *ptr, int param2){
+  //cout << "read!!!" <<endl;
+  uint8_t * new_ptr =(uint8_t *) ptr;
+  int return_value = -1;
+  vector<any> read_information2;
+  read_information = read_information2;
+  //cout << "size is "<< sizeof(read_information2) << ", " <<read_information2.size() << endl;
+  if(recv_index==0){ //received 된 data 없으면 0.5초 뒤에 실행
+    read_information.push_back(1); //read 함수는 처음에 1넣음
+    read_information.push_back(syscallUUID);
+    read_information.push_back(pid);
+    read_information.push_back(param1);
+    read_information.push_back(ptr);
+    read_information.push_back(param2);                                     
+    TimerModule::addTimer(read_information ,0.5*seconds); //<- 나중에 문제 될 수도 있음.
+    return;
+  }
+  else{
+    int read_in_function =  min(recv_index-read_index, param2);
+    if (read_in_function ==0 ){
+       return returnSystemCall(syscallUUID, -1);
+    }
+    for (int k = 0; k < read_in_function; k++){
+        new_ptr[k] = recv_buffer[read_index+k];
+    }
+    return_value = read_in_function; 
+    read_index += read_in_function; 
+  }
+  //printf("return value is %d\n",return_value);
+  return returnSystemCall(syscallUUID, return_value);
+}
+
+void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int param1, void *ptr, int param2){
+  cout << "write!!!" <<endl;
+  //param2=512;
+  uint8_t * new_ptr =(uint8_t *) ptr;
+  if(written_index + param2 <= BUF_SIZE){  //overflow 나중에 생각
+    for (int k = 0; k < param2; k++){
+        send_buffer[written_index + k] = new_ptr[k];
+    }
+    written_index += param2;
+  }
+  else{
+    vector<any> write_information2;
+    write_information = write_information2;
+    write_information.push_back(2); //write 함수는 처음에 2넣음
+    write_information.push_back(syscallUUID);
+    write_information.push_back(pid);
+    write_information.push_back(param1);
+    write_information.push_back(ptr);
+    write_information.push_back(param2);                                     
+    TimerModule::addTimer(write_information ,0.5*seconds); //<- 나중에 문제 될 수도 있음.
+    return;
+  }
+  //write할 공간 있고 거기에 write한 다음 send가능하면 send, 안 되면 return 
+  //printf("sender_window, not_send_index, send_not_acked_index, written_index\n");
+  //printf("%d %d %d %d\n",sender_window, not_send_index, send_not_acked_index, written_index);
+  if(written_index - send_not_acked_index < sender_window){
+    
+  //if(written_index - send_not_acked_index + param2 <= ntohs(sender_window)){ 
+  //if(written_index - send_not_acked_index + param2 <= BUF_SIZE){     
+    pid_fd pf1 = make_pair(pid, param1);
+    
+    printf("in write %d %d\n", sender_window - (not_send_index - send_not_acked_index) , written_index - not_send_index);
+    int sended_in_function =  min(sender_window - (not_send_index - send_not_acked_index) , written_index - not_send_index);
+
+    Four_tuple ssdd;
+    if (connect_map.find(pf1) == connect_map.end()) {
+      ssdd = accept_send_ssdd;
+    }
+    else{
+      ssdd = connect_map[pf1];
+    }
+    
+    uint32_t src_ip = get<0>(ssdd); uint16_t source_port = get<1>(ssdd);
+    uint32_t dest_ip = get<2>(ssdd); uint16_t dest_port = get<3>(ssdd);
+
+    uint16_t flag = htons(0x5010); //ack
+    uint8_t *buffer_ptr = &send_buffer[not_send_index];
+    uint16_t sender_window2 = htons(sender_window);
+    uint32_t expected_ack = ntohl(write_seq)+sended_in_function;
+    //printf("write seq ,write_ack is %d, %d\n", ntohl(write_seq), ntohl(write_ack));
+    std::array<any, 11> pkt_variable = {&src_ip, &dest_ip, &source_port, &dest_port
+    ,&write_seq, &write_ack, &flag, &sender_window2, buffer_ptr , sended_in_function, &expected_ack};
+    Write_and_Send_pkt_have_payloaod(pkt_variable);
+    write_seq = htonl(ntohl(write_seq)+sended_in_function);
+    not_send_index += sended_in_function; //written_index 만큼 send했으므로
+    return returnSystemCall(syscallUUID, param2);
+  }
+  return returnSystemCall(syscallUUID, param2);
+}
 
 void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
                                    const SystemCallParameter &param) {
@@ -298,10 +430,10 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
     this->syscall_close(syscallUUID, pid, param.param1_int);
     break;
   case READ:
-    //this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
+    this->syscall_read(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
     break;
   case WRITE:
-    //this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
+    this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr,param.param3_int);
     break;
   case CONNECT:
     this->syscall_connect(syscallUUID, pid, param.param1_int, static_cast<struct sockaddr*>(param.param2_ptr), (socklen_t)param.param3_int);
@@ -332,7 +464,6 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid,
 }
 
 void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
-  printf("arrived\n");
 
   uint32_t src_ip;
   uint32_t dest_ip;
@@ -368,11 +499,25 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   uint16_t new_flag;
   //printf("flag is %x src_port is %x\n",real_flag, src_port);
   //printf("flag is %x \n",real_flag);
+
+  //////read 관련 
+  data_size = packet.getSize()-54;
+  recv_index +=data_size;
+  if(recv_index==0){
+        }
+  else{
+    packet.readData(tcp_start+20, &(recv_buffer[recv_index-data_size]), data_size); //data_size만큼 buffer에 recv함
+    new_ack_num=htonl(ntohl(seq_num)+data_size); 
+  }
+  //////
+
+
   switch(real_flag){
     case 0b00000010:{ //SYN, HANDSHAKE 첫 단계 (서버)
         Four_tuple_struct Four_tuple_struct1; //초기화
         Four_tuple_map[ssdd] = Four_tuple_struct1;
         
+        is_handshake =1;
         address_port server_address_port;
         address_port INADDR_address_port = make_pair(htonl(INADDR_ANY),dest_port); //서버가 bind를 inaddr로 만들었을때의 pair
         address_port dest_address_port = make_pair(dest_ip,dest_port);             //서버가 bind를 특정ip로 만들었을때의 pair
@@ -385,6 +530,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
             server_address_port = dest_address_port;   //아닐 경우 (특정 ip/port) 에 listen que를 만듬
           }
         }
+
+        accept_send_ssdd = make_tuple(dest_ip, dest_port, src_ip, src_port); //write에 쓰일 4tuple 억지로 정의
+
         listen_is_connected_map[server_address_port]=1; //클라로부터 커넥트가 왔으므로 1로 설정
         new_flag = htons(0x5012);
         new_seq_num = std::rand();//
@@ -401,6 +549,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         else{
           listen_que_map[server_address_port].first.push_back(src_port);
         }
+
+        ////첫 ack정의
+        before_ack_num = ack_num;
         
       break;
     }
@@ -408,6 +559,14 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
         expected_ack = ntohl(new_seq_num);
+
+        ////write 함수에 쓰일 seq,ack,sender_window 정의
+        write_seq = new_seq_num;
+        write_ack = new_ack_num;
+        
+        ////첫 ack정의
+        before_ack_num = ack_num;
+
       break;
     case 0b00010000:{  //ACK, HANDSHAKE 세 단계 (서버)
         address_port server_address_port;
@@ -433,6 +592,16 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
 
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
+
+        send_not_acked_index += (ntohl(ack_num) - ntohl(before_ack_num));
+        
+        if(is_handshake==1){
+          write_seq = ack_num;
+          write_ack = seq_num;
+          is_handshake=0;
+        }
+        before_ack_num = ack_num;
+
         expected_ack = ntohl(new_seq_num);
       break;
   }
@@ -464,14 +633,57 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   //cout << "push ack is  "<<  ntohl(ack_num) << endl;
   //cout << "new ack is "<< ntohl(new_ack_num) << endl;
   //cout << "in packetarrived ack is"<<  expected_ack <<endl;
-  array<any, 9> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port
-  ,&new_seq_num, &new_ack_num, &new_flag, &window, &expected_ack};
-  Write_and_Send_pkt(pkt_variable);
+  if(written_index == not_send_index){ //handshake
+    array<any, 9> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port
+    ,&new_seq_num, &new_ack_num, &new_flag, &window, &expected_ack};
+    Write_and_Send_pkt(pkt_variable);
+  }
+
+  else{ //written된게 있으나 not_send 된게 있으면 보냄
+    if(ntohl(ack_num) < ntohl(write_seq)){ // 받은 ack이 write한 것보다 작으면
+      return;
+    }
+    int num = min(sender_window - (not_send_index - send_not_acked_index), written_index - not_send_index);
+    uint8_t will_send[num];
+    uint8_t *ptr = will_send;
+    expected_ack = ntohl(seq_num)+num;
+    for(int k=0;k< num; k++){
+      will_send[k] = send_buffer[not_send_index+k];  
+    }
+    array<any, 11> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port
+    ,&ack_num, &seq_num, &new_flag, &window, ptr, num, &expected_ack}; 
+    Write_and_Send_pkt_have_payloaod(pkt_variable);
+    not_send_index += num;
+  }
+
+
 } 
 
 void TCPAssignment::timerCallback(std::any payload) {
   vector<any> all_information = any_cast<vector<any>>(payload);
   switch (any_cast<int>(all_information[0])) {
+    case -2:{
+      uint32_t src_ip = (any_cast<uint32_t >(all_information[1]));
+      uint32_t dest_ip = (any_cast<uint32_t >(all_information[2]));
+      uint16_t source_port = (any_cast<uint16_t >(all_information[3]));
+      uint16_t dest_port = (any_cast<uint16_t >(all_information[4]));
+      uint32_t seq_num =(any_cast<uint32_t >(all_information[5]));
+      uint32_t ack_num =(any_cast<uint32_t >(all_information[6]));
+      uint16_t flag = (any_cast<uint16_t >(all_information[7]));
+      uint16_t window = (any_cast<uint16_t >(all_information[8]));
+      uint8_t *payload_ptr = (any_cast<uint8_t *>(all_information[9]));
+      int payload_length = (any_cast<int >(all_information[10]));
+      uint32_t expected_ack = (any_cast<uint32_t >(all_information[11]));
+      
+      std::array<any, 11> pkt_variable = {&src_ip, &dest_ip, &source_port, &dest_port
+        ,&seq_num, &ack_num, &flag, &window, payload_ptr, payload_length, &expected_ack};
+      Four_tuple ssdd= make_tuple(src_ip, source_port, dest_ip, dest_port);
+
+      if(find(Four_tuple_map[ssdd].ack_vector.begin(),Four_tuple_map[ssdd].ack_vector.end(), expected_ack)==Four_tuple_map[ssdd].ack_vector.end()){ //원하는 ack이 없으면
+        Write_and_Send_pkt_have_payloaod(pkt_variable);
+      }
+      break;
+    }
     case -1:{
       uint32_t src_ip = (any_cast<uint32_t >(all_information[1]));
       uint32_t dest_ip = (any_cast<uint32_t >(all_information[2]));
@@ -496,8 +708,14 @@ void TCPAssignment::timerCallback(std::any payload) {
       syscall_accept(any_cast<UUID>(all_information[1]), any_cast<int>(all_information[2])
       , any_cast<int>(all_information[3]), any_cast<sockaddr*>(all_information[4]), any_cast<socklen_t*>(all_information[5]));
       break;
-    case 1:{
-      sendPacket("IPv4", std::move(any_cast<Packet>(all_information[1])));
+    case 1:{ //read 함수
+      syscall_read(any_cast<UUID>(all_information[1]), any_cast<int>(all_information[2])
+      , any_cast<int>(all_information[3]), any_cast<void *>(all_information[4]), any_cast<int>(all_information[5]));
+      break;
+    }
+    case 2:{ //write 함수
+      syscall_write(any_cast<UUID>(all_information[1]), any_cast<int>(all_information[2])
+      , any_cast<int>(all_information[3]), any_cast<void *>(all_information[4]), any_cast<int>(all_information[5]));
       break;
     }
     default:
@@ -540,7 +758,6 @@ void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
   pkt.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
   //
   //cout << "in write and send expected_ack is "<<  expected_ack <<endl;
-  uint8_t real_flag = ntohs(flag) & 0xff;
   if(expected_ack==0){ //fin+ack 은 무시
     return;
   }
@@ -548,7 +765,9 @@ void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
   Time time = HostModule::getCurrentTime();
   Four_tuple_map[ssdd].Timer[ntohl(seq_num)+1].first = time; //hand shake이므로 받을 ack은 seq+1이고 거기에 저장
   sendPacket("IPv4", std::move(pkt));
-  //return;
+
+  return;
+
   for (auto iter = Four_tuple_map[ssdd].ack_vector.begin() ; iter != Four_tuple_map[ssdd].ack_vector.end(); iter++) {
     //cout << "ack is " <<  *iter <<endl;
   }
@@ -570,8 +789,75 @@ void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
   }
 }
 
+void TCPAssignment::Write_and_Send_pkt_have_payloaod(std::any pkt_variable){
+  
+  array<any,11> pkt_vector = any_cast<array<any,11>>(pkt_variable);
+  int length_payload = any_cast<int>(pkt_vector[9]);
+  Packet pkt (packet_size + length_payload);
+
+  uint32_t src_ip = *(any_cast<uint32_t *>(pkt_vector[0]));
+  uint32_t dest_ip = *(any_cast<uint32_t *>(pkt_vector[1]));
+  uint16_t source_port = *(any_cast<uint16_t *>(pkt_vector[2]));
+  uint16_t dest_port = *(any_cast<uint16_t *>(pkt_vector[3]));
+  uint32_t seq_num =*(any_cast<uint32_t *>(pkt_vector[4]));
+  uint32_t ack_num =*(any_cast<uint32_t *>(pkt_vector[5]));
+  uint16_t flag = *(any_cast<uint16_t *>(pkt_vector[6]));
+  uint16_t window = *(any_cast<uint16_t *>(pkt_vector[7]));
+  uint8_t *payload_ptr = any_cast<uint8_t *>(pkt_vector[8]);
+  //length_payload
+  uint32_t expected_ack = *(any_cast<uint32_t *>(pkt_vector[10]));
+
+  pkt.writeData(tcp_start-8, &src_ip, 4);
+  pkt.writeData(tcp_start-4, &dest_ip, 4);
+  pkt.writeData(tcp_start,   &source_port, 2);
+  pkt.writeData(tcp_start+2, &dest_port, 2);
+  pkt.writeData(tcp_start+4, &seq_num, 4);
+  pkt.writeData(tcp_start+8, &ack_num, 4);
+  pkt.writeData(tcp_start+12, &flag, 2);
+  pkt.writeData(tcp_start+14, &window, 2); //window
+  pkt.writeData(tcp_start+20, payload_ptr, length_payload); //자료형 맞게 변환했는지 모름
+  
+  //checksum
+  uint8_t temp[20+length_payload];
+  pkt.readData(tcp_start, &temp, 20+length_payload);
+  uint16_t checksum = NetworkUtil::tcp_sum(*(any_cast<uint32_t *>(pkt_vector[0])), 
+  *(any_cast<uint32_t *>(pkt_vector[1])),temp,20+length_payload); //
+  checksum = ~checksum;
+  checksum = htons(checksum);
+  pkt.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
+  //
+  if(expected_ack==0){ //fin+ack 은 무시
+    return;
+  }
+  Four_tuple ssdd= make_tuple(src_ip, source_port, dest_ip, dest_port);
+  Time time = HostModule::getCurrentTime();
+  Four_tuple_map[ssdd].Timer[ntohl(seq_num)+1].first = time; //hand shake이므로 받을 ack은 seq+1이고 거기에 저장
+  sendPacket("IPv4", std::move(pkt));
+  
+  return;
+
+  if(find(Four_tuple_map[ssdd].ack_vector.begin(),Four_tuple_map[ssdd].ack_vector.end(), expected_ack)==Four_tuple_map[ssdd].ack_vector.end()){ //원하는 ack이 없으면
+    vector<any> retransmit_pkt2;
+    retransmit_pkt = retransmit_pkt2;
+    retransmit_pkt.push_back(-2);
+    retransmit_pkt.push_back(src_ip);
+    retransmit_pkt.push_back(dest_ip);
+    retransmit_pkt.push_back(source_port);
+    retransmit_pkt.push_back(dest_port);
+    retransmit_pkt.push_back(seq_num);
+    retransmit_pkt.push_back(ack_num);
+    retransmit_pkt.push_back(flag);
+    retransmit_pkt.push_back(window);
+    retransmit_pkt.push_back(payload_ptr);
+    retransmit_pkt.push_back(length_payload);
+    retransmit_pkt.push_back(expected_ack);
+    TimerModule::addTimer(retransmit_pkt ,Four_tuple_map[ssdd].TimeoutInterval);
+  }
 
 
+
+  sendPacket("IPv4", std::move(pkt));
+}
 
 } // namespace E
 
