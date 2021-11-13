@@ -382,15 +382,11 @@ void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int param1, void *p
     return;
   }
   //write할 공간 있고 거기에 write한 다음 send가능하면 send, 안 되면 return 
-  //printf("sender_window, not_send_index, send_not_acked_index, written_index\n");
-  //printf("%d %d %d %d\n",sender_window, not_send_index, send_not_acked_index, written_index);
+
   if(written_index - send_not_acked_index < sender_window){
-    
-  //if(written_index - send_not_acked_index + param2 <= ntohs(sender_window)){ 
-  //if(written_index - send_not_acked_index + param2 <= BUF_SIZE){     
+     
     pid_fd pf1 = make_pair(pid, param1);
     
-    printf("in write %d %d\n", sender_window - (not_send_index - send_not_acked_index) , written_index - not_send_index);
     int sended_in_function =  min(sender_window - (not_send_index - send_not_acked_index) , written_index - not_send_index);
 
     Four_tuple ssdd;
@@ -516,8 +512,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
     case 0b00000010:{ //SYN, HANDSHAKE 첫 단계 (서버)
         Four_tuple_struct Four_tuple_struct1; //초기화
         Four_tuple_map[ssdd] = Four_tuple_struct1;
-        
         is_handshake =1;
+
         address_port server_address_port;
         address_port INADDR_address_port = make_pair(htonl(INADDR_ANY),dest_port); //서버가 bind를 inaddr로 만들었을때의 pair
         address_port dest_address_port = make_pair(dest_ip,dest_port);             //서버가 bind를 특정ip로 만들었을때의 pair
@@ -593,9 +589,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         new_flag = htons(0x5010);
         new_seq_num = ack_num;
 
-        send_not_acked_index += (ntohl(ack_num) - ntohl(before_ack_num));
+        send_not_acked_index += (ntohl(ack_num) - ntohl(before_ack_num)); //ack된 만큼 +
         
-        if(is_handshake==1){
+        if(is_handshake==1){ //write함수에 쓰일 처음 쓰일 write_seq, write_ack 설정
           write_seq = ack_num;
           write_ack = seq_num;
           is_handshake=0;
@@ -608,7 +604,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
     case 0b00010001: //FIN + ACK
         new_flag = htons(0x5010);
         new_seq_num = ack_num;//
-        expected_ack = 0; //ack 안와도 됨
+        expected_ack = 0; // 고려 안하는중 expected_ack이 0이면 retransmit안함
         //return;
       break;
     default :    
@@ -622,7 +618,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   Time time = HostModule::getCurrentTime();
   
   Four_tuple_map[ssdd].Timer[ntohl(ack_num)].second = time; //map 2개
-  if(real_flag != 0b00000010){ //처음아닐때만
+  if(real_flag != 0b00000010){ //처음아닐때만 처음일 때는 0.1초로 초기화됨
     Four_tuple_map[ssdd].SampleRTT = time - Four_tuple_map[ssdd].Timer[ntohl(ack_num)].first;
   }
   Four_tuple_map[ssdd].EstimatedRTT = (1-ALPHA) * Four_tuple_map[ssdd].EstimatedRTT + ALPHA * Four_tuple_map[ssdd].SampleRTT;
@@ -630,14 +626,11 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   Four_tuple_map[ssdd].DevRTT = (1-BETA) * Four_tuple_map[ssdd].DevRTT + BETA * t;
   Four_tuple_map[ssdd].TimeoutInterval = Four_tuple_map[ssdd].EstimatedRTT + 4*Four_tuple_map[ssdd].DevRTT;
   //Four_tuple_map[ssdd].ack_vector.push_back(ntohl(ack_num));   //받은 ack을 기록
-  cout << "push ack is  "<<  ntohl(ack_num) << endl;
-  //cout << "new ack is "<< ntohl(new_ack_num) << endl;
-  //cout << "in packetarrived ack is"<<  expected_ack <<endl;
-  if(written_index == not_send_index){ //handshake
+
+  if(written_index == not_send_index){ //보낼 payload가 없을 때 이미 다 보냈음
     array<any, 9> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port
     ,&new_seq_num, &new_ack_num, &new_flag, &window, &expected_ack};
     Write_and_Send_pkt(pkt_variable);
-    printf("arrived 9\n");
   }
 
   else{ //written된게 있으나 not_send 된게 있으면 보냄
@@ -646,25 +639,16 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       return;
     }
     
-    if(ntohl(ack_num) < ntohl(write_seq)){ // 받은 ack이 write한 것보다 작으면
+    if(ntohl(ack_num) < ntohl(write_seq)){ // 받은 ack이 write해서 보낸 seq보다 작으면
       return;
     }
     int num = min(sender_window - (not_send_index - send_not_acked_index), written_index - not_send_index);
-    //test
-    /*
-    if(num==0){
-      return;
-    }
-    */
-    //
-    cout << "num is " <<num <<endl;
     uint8_t will_send[num];
     uint8_t *ptr = will_send;
     expected_ack = ntohl(ack_num)+num; //받은 ack에 쓴 num 썼으니 ack +num 만큼이 다음에 올 ack
     for(int k=0;k< num; k++){
       will_send[k] = send_buffer[not_send_index+k];  
     }
-    printf("arrived 11\n");
     array<any, 11> pkt_variable = {&dest_ip, &src_ip, &dest_port, &src_port
     ,&ack_num, &seq_num, &new_flag, &window, ptr, num, &expected_ack}; 
     Write_and_Send_pkt_have_payloaod(pkt_variable);
@@ -771,7 +755,6 @@ void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
   checksum = htons(checksum);
   pkt.writeData(tcp_start + 16, (uint8_t *)&checksum, 2);
   //
-  //cout << "in write and send expected_ack is "<<  expected_ack <<endl;
   if(expected_ack==0){ //fin+ack 은 무시
     return;
   }
@@ -781,10 +764,6 @@ void TCPAssignment::Write_and_Send_pkt(std::any pkt_variable){
   sendPacket("IPv4", std::move(pkt));
 
   //return; //retranstmit
-
-  for (auto iter = Four_tuple_map[ssdd].ack_vector.begin() ; iter != Four_tuple_map[ssdd].ack_vector.end(); iter++) {
-    //cout << "ack is " <<  *iter <<endl;
-  }
 
   if(find(Four_tuple_map[ssdd].ack_vector.begin(),Four_tuple_map[ssdd].ack_vector.end(), expected_ack)==Four_tuple_map[ssdd].ack_vector.end()){ //원하는 ack이 없으면
     vector<any> retransmit_pkt2;
