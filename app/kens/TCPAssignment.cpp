@@ -57,7 +57,7 @@ int written_index = 0;
 uint32_t write_ack = 0;
 uint32_t write_seq = 0;
 int is_handshake = 0;
-uint32_t before_ack_num;
+uint32_t before_ack_num=0;
 vector<any> write_information;
 
 Four_tuple accept_send_ssdd; //하드 카피
@@ -82,6 +82,9 @@ struct Four_tuple_struct
 
 map<Four_tuple , Four_tuple_struct > Four_tuple_map;
 vector<any> retransmit_pkt;
+
+//3-2 추가
+uint64_t before_new_ack_num = 0;
 
 
 
@@ -360,7 +363,7 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int param1, void *pt
 }
 
 void TCPAssignment::syscall_write(UUID syscallUUID, int pid, int param1, void *ptr, int param2){
-  cout << "write!!!" <<endl;
+  //cout << "write!!!" <<endl;
   //param2=512;
   uint8_t * new_ptr =(uint8_t *) ptr;
   if(written_index + param2 <= BUF_SIZE){  //overflow 나중에 생각
@@ -472,6 +475,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   uint16_t checksum;
   uint32_t expected_ack;
 
+
   packet.readData(tcp_start-8, &src_ip, 4);
   packet.readData(tcp_start-4, &dest_ip, 4);
   packet.readData(tcp_start, &src_port, 2);
@@ -499,9 +503,29 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   //////read 관련 
   data_size = packet.getSize()-54;
   recv_index +=data_size;
+  printf("arrived\n");
   if(recv_index==0){
         }
   else{
+    //if(before_new_ack_num!= 0 && seq_num != before_new_ack_num){
+    if(seq_num != before_new_ack_num){
+      recv_index -= data_size;
+      printf("return\n");
+      return;
+    }
+    //checksum check
+    uint8_t temp[20+data_size];
+    packet.readData(tcp_start, &temp, 20+data_size);
+    uint16_t confirm_checksum = NetworkUtil::tcp_sum(src_ip, dest_ip ,temp,20+data_size); //
+    confirm_checksum = ~confirm_checksum;
+    confirm_checksum = htons(confirm_checksum);
+    //printf("%x %x %x %x\n",confirm_checksum, htons(confirm_checksum), checksum, htons(checksum));
+    if(confirm_checksum != checksum){
+      recv_index -= data_size;
+      printf("hi!\n");
+      return;
+    }
+
     packet.readData(tcp_start+20, &(recv_buffer[recv_index-data_size]), data_size); //data_size만큼 buffer에 recv함
     new_ack_num=htonl(ntohl(seq_num)+data_size); 
   }
@@ -614,6 +638,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       //perror("not yet\n");
       break;
   }
+
+  before_new_ack_num = new_ack_num;
 
   Time time = HostModule::getCurrentTime();
   
@@ -809,7 +835,7 @@ void TCPAssignment::Write_and_Send_pkt_have_payloaod(std::any pkt_variable){
   pkt.writeData(tcp_start+12, &flag, 2);
   pkt.writeData(tcp_start+14, &window, 2); //window
   pkt.writeData(tcp_start+20, payload_ptr, length_payload); //자료형 맞게 변환했는지 모름
-  
+
   //checksum
   uint8_t temp[20+length_payload];
   pkt.readData(tcp_start, &temp, 20+length_payload);
