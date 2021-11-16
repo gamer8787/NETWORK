@@ -57,7 +57,7 @@ int written_index = 0;
 uint32_t write_ack = 0;
 uint32_t write_seq = 0;
 int is_handshake = 0;
-uint32_t before_ack_num=0;
+uint32_t before_ack_num;
 vector<any> write_information;
 
 Four_tuple accept_send_ssdd; //하드 카피
@@ -84,9 +84,9 @@ map<Four_tuple , Four_tuple_struct > Four_tuple_map;
 vector<any> retransmit_pkt;
 
 //3-2 추가
-uint64_t before_new_ack_num = 0;
-
-
+uint32_t before_new_ack_num = 0;
+uint32_t before_seq_num = 0;
+vector<uint32_t> seq_vector;
 
 TCPAssignment::TCPAssignment(Host &host)
     : HostModule("TCP", host), RoutingInfoInterface(host),
@@ -107,7 +107,7 @@ void TCPAssignment::syscall_socket(UUID syscallUUID, int pid, int param1, int pa
 }
 void TCPAssignment::syscall_close(UUID syscallUUID, int pid, int param1)
 {
-
+  //cout << "close!!" <<endl;
   pid_fd pf1=make_pair(pid,param1);
   listen_que_map.erase(bind_map[pf1]); //FIN에서 진행
   //listen_room_size_map.erase(bind_map[pf1]);   //FIN에서 진행 ? 적절한 곳에서 해야됨 
@@ -182,8 +182,10 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1,
   send_not_acked_index = 0; 
   not_send_index = 0;       
   written_index = 0;
-  ////////
-  //cout << "connect!" << endl;
+
+  vector<uint32_t> seq_vector2; //seq_vector 초기화
+  seq_vector = seq_vector2;
+  before_new_ack_num = 0;
 
   struct sockaddr_in* socksock = (sockaddr_in *)param2_ptr;
   ipv4_t dest_ip ;  
@@ -225,7 +227,6 @@ void TCPAssignment::syscall_connect(UUID syscallUUID, int pid, int param1,
   Four_tuple_map[ssdd] = Four_tuple_struct1;
   Write_and_Send_pkt(pkt_variable);
 
-
   returnSystemCall(syscallUUID, 0);
 }
 
@@ -250,7 +251,6 @@ void TCPAssignment::syscall_listen(UUID syscallUUID,int pid, int param1,
 
 void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
     		sockaddr* param2_ptr, socklen_t* param3_ptr){
-  cout << "accept!!" << endl; 
   pid_fd server_pf=make_pair(pid,param1);
   
   recv_index = 0; //매 테스트 case 마다 일단 초기화
@@ -261,6 +261,10 @@ void TCPAssignment::syscall_accept(UUID syscallUUID,int pid, int param1,
   written_index = 0;
   //write_ack = 0; 
   //write_seq = 0;
+
+  vector<uint32_t> seq_vector2; //seq_vector 초기화
+  seq_vector = seq_vector2;
+  before_new_ack_num = 0;
 
   if (bind_map.find(server_pf) == bind_map.end()) {
       printf("bind_map not find!\n");
@@ -337,7 +341,8 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int param1, void *pt
   vector<any> read_information2;
   read_information = read_information2;
   //cout << "size is "<< sizeof(read_information2) << ", " <<read_information2.size() << endl;
-  if(recv_index==0){ //received 된 data 없으면 0.5초 뒤에 실행
+  if(recv_index==0 || recv_index == read_index){ //received 된 data 없으면 0.5초 뒤에 실행
+  //if(recv_index==0 ){ //received 된 data 없으면 0.5초 뒤에 실행
     read_information.push_back(1); //read 함수는 처음에 1넣음
     read_information.push_back(syscallUUID);
     read_information.push_back(pid);
@@ -350,6 +355,7 @@ void TCPAssignment::syscall_read(UUID syscallUUID, int pid, int param1, void *pt
   else{
     int read_in_function =  min(recv_index-read_index, param2);
     if (read_in_function ==0 ){
+      //printf("hi\n");
        return returnSystemCall(syscallUUID, -1);
     }
     for (int k = 0; k < read_in_function; k++){
@@ -475,7 +481,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   uint16_t checksum;
   uint32_t expected_ack;
 
-
   packet.readData(tcp_start-8, &src_ip, 4);
   packet.readData(tcp_start-4, &dest_ip, 4);
   packet.readData(tcp_start, &src_port, 2);
@@ -503,34 +508,59 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
   //////read 관련 
   data_size = packet.getSize()-54;
   recv_index +=data_size;
-  printf("arrived\n");
+
+  //checksum check
+  uint8_t data[data_size];
+  packet.readData(tcp_start+20, &data, data_size);
+  Packet pkt (packet_size+data_size);
+
+  pkt.writeData(tcp_start-8, &src_ip, 4);
+  pkt.writeData(tcp_start-4, &dest_ip, 4);
+  pkt.writeData(tcp_start,   &src_port, 2);
+  pkt.writeData(tcp_start+2, &dest_port, 2);
+  pkt.writeData(tcp_start+4, &seq_num, 4);
+  pkt.writeData(tcp_start+8, &ack_num, 4);
+  pkt.writeData(tcp_start+12, &flag, 2);
+  pkt.writeData(tcp_start+14, &window, 2); 
+  pkt.writeData(tcp_start+20, data, data_size);
+
+  uint8_t temp[20+data_size];
+  pkt.readData(tcp_start, &temp, 20+data_size);
+  uint16_t confirm_checksum = NetworkUtil::tcp_sum(src_ip, dest_ip ,temp,20+data_size); //
+  confirm_checksum = ~confirm_checksum;
+  confirm_checksum = htons(confirm_checksum);
+  //printf("%x %x %x %x\n",confirm_checksum, htons(confirm_checksum), checksum, htons(checksum));
+  
+  ////원하는 seq인지 check
   if(recv_index==0){
         }
   else{
-    //if(before_new_ack_num!= 0 && seq_num != before_new_ack_num){
-    if(seq_num != before_new_ack_num){
+    /*
+    if(find(seq_vector.begin(),seq_vector.end(), seq_num)!=seq_vector.end()){ //받은 seq이 이미 받은것이라면 그냥 return 중복 패킷
+      printf("dup\n");
       recv_index -= data_size;
-      printf("return\n");
       return;
     }
-    //checksum check
-    uint8_t temp[20+data_size];
-    packet.readData(tcp_start, &temp, 20+data_size);
-    uint16_t confirm_checksum = NetworkUtil::tcp_sum(src_ip, dest_ip ,temp,20+data_size); //
-    confirm_checksum = ~confirm_checksum;
-    confirm_checksum = htons(confirm_checksum);
-    //printf("%x %x %x %x\n",confirm_checksum, htons(confirm_checksum), checksum, htons(checksum));
-    if(confirm_checksum != checksum){
+    */
+    if(confirm_checksum != checksum){ //손상
+      //printf("fail\n");
       recv_index -= data_size;
-      printf("hi!\n");
-      return;
+      new_ack_num = before_new_ack_num;
+      //return;
     }
-
-    packet.readData(tcp_start+20, &(recv_buffer[recv_index-data_size]), data_size); //data_size만큼 buffer에 recv함
-    new_ack_num=htonl(ntohl(seq_num)+data_size); 
+    
+    else if(before_new_ack_num!=0 && seq_num != before_new_ack_num){ //원하지 않는 seq
+      //printf("unorder\n");
+      recv_index -= data_size;
+      new_ack_num = before_new_ack_num;
+    }
+    
+    else{
+      packet.readData(tcp_start+20, &(recv_buffer[recv_index-data_size]), data_size); //data_size만큼 buffer에 recv함
+      new_ack_num=htonl(ntohl(seq_num)+data_size); 
+    }
   }
   //////
-
 
   switch(real_flag){
     case 0b00000010:{ //SYN, HANDSHAKE 첫 단계 (서버)
@@ -625,12 +655,15 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
         expected_ack = ntohl(new_seq_num);
       break;
   }
-    case 0b00010001: //FIN + ACK
+    case 0b00010001:{ //FIN + ACK
         new_flag = htons(0x5010);
         new_seq_num = ack_num;//
         expected_ack = 0; // 고려 안하는중 expected_ack이 0이면 retransmit안함
-        //return;
+        vector<any> fin_ack;
+        fin_ack.push_back(3);
+        TimerModule::addTimer(fin_ack ,5*seconds); //시간 바꿔봄
       break;
+    }
     default :    
       printf("flag is !! %x\n",real_flag);
       printf("not yet\n");
@@ -638,9 +671,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
       //perror("not yet\n");
       break;
   }
-
   before_new_ack_num = new_ack_num;
-
   Time time = HostModule::getCurrentTime();
   
   Four_tuple_map[ssdd].Timer[ntohl(ack_num)].second = time; //map 2개
@@ -681,6 +712,9 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet &&packet) {
     not_send_index += num;
   }
   Four_tuple_map[ssdd].ack_vector.push_back(ntohl(ack_num));
+  seq_vector.push_back(seq_num);
+  //before_new_ack_num = new_ack_num
+  before_seq_num = seq_num;
 } 
 
 void TCPAssignment::timerCallback(std::any payload) {
@@ -740,6 +774,11 @@ void TCPAssignment::timerCallback(std::any payload) {
     case 2:{ //write 함수
       syscall_write(any_cast<UUID>(all_information[1]), any_cast<int>(all_information[2])
       , any_cast<int>(all_information[3]), any_cast<void *>(all_information[4]), any_cast<int>(all_information[5]));
+      break;
+    }
+    case 3:{
+      map<pid_fd , address_port > bind_map2;
+      bind_map=bind_map2;
       break;
     }
     default:
@@ -835,7 +874,7 @@ void TCPAssignment::Write_and_Send_pkt_have_payloaod(std::any pkt_variable){
   pkt.writeData(tcp_start+12, &flag, 2);
   pkt.writeData(tcp_start+14, &window, 2); //window
   pkt.writeData(tcp_start+20, payload_ptr, length_payload); //자료형 맞게 변환했는지 모름
-
+  
   //checksum
   uint8_t temp[20+length_payload];
   pkt.readData(tcp_start, &temp, 20+length_payload);
